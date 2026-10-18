@@ -43,7 +43,7 @@ class OrganizeApi {
             },
             body: jsonEncode(body),
           )
-          .timeout(const Duration(seconds: 30));
+          .timeout(const Duration(seconds: 150));
     } catch (_) {
       // Timeout, bad URL, unencodable body, TLS/socket errors: all `failed`.
       throw const OrganizeApiException(OrganizeErrorKind.failed);

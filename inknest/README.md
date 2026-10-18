@@ -9,7 +9,7 @@ Status: not deployed yet (needs the owner's Supabase project and NaraRouter key)
 supabase login
 supabase link --project-ref <project-ref>
 supabase db push
-supabase secrets set NARA_API_KEY=<key> NARA_BASE_URL=<nara base url> NARA_MODEL=<agnes alias> \
+supabase secrets set NARA_API_KEY=<key> NARA_BASE_URL=https://router.bynara.id/v1 NARA_MODEL=agnes-3-flash \
   AF_CLOUD_URL=https://beta.appflowy.cloud DAILY_LIMIT=50 GLOBAL_DAILY_LIMIT=500
 supabase functions deploy organize --no-verify-jwt
 ```
@@ -19,6 +19,8 @@ URL: `https://<project-ref>.supabase.co/functions/v1/organize`
 
 Secrets: `NARA_API_KEY`, `NARA_BASE_URL`, `NARA_MODEL`, `AF_CLOUD_URL`,
 `DAILY_LIMIT` (default 50), `GLOBAL_DAILY_LIMIT` (default 500).
+
+Agnes 3 Flash typically answers in 40–80 s; the function waits up to 120 s and the app up to 150 s.
 `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` are provided by Supabase.
 
 ## Invite a user

@@ -68,7 +68,7 @@ export function realDeps(
           messages,
           temperature: 0,
         }),
-        signal: AbortSignal.timeout(25000),
+        signal: AbortSignal.timeout(120000),
       });
       if (!res.ok) throw new Error(`provider ${res.status}`);
       const content = (await res.json())?.choices?.[0]?.message?.content;
