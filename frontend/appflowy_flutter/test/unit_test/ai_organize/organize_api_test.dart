@@ -69,4 +69,16 @@ void main() {
     api = _api((_) async => http.Response('"oops"', 200));
     expect(await _kind(api), OrganizeErrorKind.failed);
   });
+
+  test('non-http failures and wrong field types fail', () async {
+    var api = OrganizeApi(
+      url: 'http://[bad',
+      client: MockClient((_) async => http.Response('{}', 200)),
+    );
+    expect(await _kind(api), OrganizeErrorKind.failed);
+    api = _api((_) async => throw StateError('x'));
+    expect(await _kind(api), OrganizeErrorKind.failed);
+    api = _api((_) async => http.Response('{"title":1,"reason":"r"}', 200));
+    expect(await _kind(api), OrganizeErrorKind.failed);
+  });
 }

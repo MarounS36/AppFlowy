@@ -1,4 +1,3 @@
-import 'dart:async';
 import 'dart:convert';
 
 import 'package:appflowy/features/ai_organize/data/organize_models.dart';
@@ -45,9 +44,8 @@ class OrganizeApi {
             body: jsonEncode(body),
           )
           .timeout(const Duration(seconds: 30));
-    } on TimeoutException {
-      throw const OrganizeApiException(OrganizeErrorKind.failed);
-    } on http.ClientException {
+    } catch (_) {
+      // Timeout, bad URL, unencodable body, TLS/socket errors: all `failed`.
       throw const OrganizeApiException(OrganizeErrorKind.failed);
     }
 
