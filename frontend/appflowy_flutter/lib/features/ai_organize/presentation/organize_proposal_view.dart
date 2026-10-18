@@ -16,12 +16,16 @@ class OrganizeProposalView extends StatefulWidget {
     required this.candidates,
     required this.onApply,
     required this.onReject,
+    this.applyLabel,
   });
 
   final OrganizeProposal proposal;
   final List<FolderCandidate> candidates;
   final ValueChanged<OrganizeDecision> onApply;
   final VoidCallback onReject;
+
+  /// Overrides the Apply button text (e.g. "Apply anyway" for a stale proposal).
+  final String? applyLabel;
 
   @override
   State<OrganizeProposalView> createState() => _OrganizeProposalViewState();
@@ -41,15 +45,15 @@ class _OrganizeProposalViewState extends State<OrganizeProposalView> {
     super.dispose();
   }
 
-  void _apply() {
+  OrganizeDecision get _decision {
     final title = _title.text.trim();
-    widget.onApply(
-      OrganizeDecision(
-        title: _titleChecked && title.isNotEmpty ? title : null,
-        folderId: _folderChecked ? _folderId : null,
-      ),
+    return OrganizeDecision(
+      title: _titleChecked && title.isNotEmpty ? title : null,
+      folderId: _folderChecked ? _folderId : null,
     );
   }
+
+  void _apply() => widget.onApply(_decision);
 
   Future<void> _chooseFolder() async {
     final picked = await showMobileBottomSheet<FolderCandidate>(
@@ -159,8 +163,14 @@ class _OrganizeProposalViewState extends State<OrganizeProposalView> {
                 const SizedBox(width: 12),
                 Expanded(
                   child: FilledButton(
-                    onPressed: _apply,
-                    child: Text(LocaleKeys.aiOrganize_applySelected.tr()),
+                    onPressed:
+                        _decision.title == null && _decision.folderId == null
+                            ? null
+                            : _apply,
+                    child: Text(
+                      widget.applyLabel ??
+                          LocaleKeys.aiOrganize_applySelected.tr(),
+                    ),
                   ),
                 ),
               ],

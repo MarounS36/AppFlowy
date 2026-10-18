@@ -9,6 +9,7 @@ import 'package:appflowy/mobile/presentation/widgets/show_flowy_mobile_confirm_d
 import 'package:appflowy/workspace/presentation/widgets/dialogs.dart';
 import 'package:easy_localization/easy_localization.dart';
 import 'package:flowy_infra_ui/flowy_infra_ui.dart';
+import 'package:appflowy/features/ai_organize/presentation/organize_errors.dart';
 import 'package:flutter/material.dart';
 
 /// Opens the Organize sheet: consent dialog on first use, spinner, then the
@@ -27,6 +28,23 @@ Future<void> showOrganizeSheet(
     );
     return;
   }
+  if (!context.mounted) return;
+  await showOrganizeSheetFor(
+    context,
+    service,
+    noteId: noteId,
+    proposalId: proposalId,
+  );
+}
+
+/// [showOrganizeSheet] with the service already resolved.
+@visibleForTesting
+Future<void> showOrganizeSheetFor(
+  BuildContext context,
+  OrganizeService service, {
+  required String noteId,
+  String? proposalId,
+}) async {
   if (proposalId == null && !(await service.state()).consented) {
     if (!context.mounted) return;
     var accepted = false;
@@ -59,7 +77,7 @@ Future<void> showOrganizeSheet(
   );
 }
 
-enum _Phase { working, review, stale, failed, nothing }
+enum _Phase { working, review, failed, nothing }
 
 class _OrganizeSheet extends StatefulWidget {
   const _OrganizeSheet({
@@ -81,7 +99,6 @@ class _OrganizeSheetState extends State<_OrganizeSheet> {
   OrganizeProposal? _proposal;
   List<FolderCandidate> _candidates = const [];
   OrganizeErrorKind _error = OrganizeErrorKind.failed;
-  OrganizeDecision? _lastDecision;
 
   @override
   void initState() {
@@ -103,24 +120,27 @@ class _OrganizeSheetState extends State<_OrganizeSheet> {
   }
 
   Future<void> _load(String id) async {
-    final s = await widget.service.state();
-    if (!mounted) return;
-    await _show(s.proposals.where((p) => p.id == id).firstOrNull);
+    try {
+      final s = await widget.service.state();
+      if (!mounted) return;
+      await _show(s.proposals.where((p) => p.id == id).firstOrNull);
+    } catch (_) {
+      _fail(OrganizeErrorKind.failed);
+    }
   }
 
   Future<void> _show(OrganizeProposal? p) async {
-    final candidates = p?.state == ProposalState.needsReview
-        ? await widget.service.candidatesFor(widget.noteId)
-        : const <FolderCandidate>[];
+    final candidates =
+        p?.state == ProposalState.needsReview || p?.state == ProposalState.stale
+            ? await widget.service.candidatesFor(widget.noteId)
+            : const <FolderCandidate>[];
     if (!mounted) return;
     setState(() {
       _proposal = p;
       _candidates = candidates;
       switch (p?.state) {
-        case ProposalState.needsReview:
+        case ProposalState.needsReview || ProposalState.stale:
           _phase = _Phase.review;
-        case ProposalState.stale:
-          _phase = _Phase.stale;
         case ProposalState.failed:
           _error = p!.error ?? OrganizeErrorKind.failed;
           _phase = _Phase.failed;
@@ -141,7 +161,6 @@ class _OrganizeSheetState extends State<_OrganizeSheet> {
   Future<void> _apply(OrganizeDecision d, {bool force = false}) async {
     final p = _proposal!;
     if (_phase == _Phase.working) return;
-    _lastDecision = d;
     setState(() => _phase = _Phase.working);
     ProposalState result;
     try {
@@ -154,7 +173,8 @@ class _OrganizeSheetState extends State<_OrganizeSheet> {
       case ProposalState.partiallyApplied:
         showToastNotification(message: LocaleKeys.aiOrganize_applied.tr());
       case ProposalState.stale:
-        if (mounted) setState(() => _phase = _Phase.stale);
+        // The proposal object is now stale; show it with Re-run / Apply anyway.
+        if (mounted) setState(() => _phase = _Phase.review);
         return;
       default:
         showToastNotification(
@@ -173,25 +193,7 @@ class _OrganizeSheetState extends State<_OrganizeSheet> {
     if (mounted) Navigator.of(context).pop();
   }
 
-  String _errorText() => switch (_error) {
-        OrganizeErrorKind.unauthorized =>
-          LocaleKeys.aiOrganize_signInAgain.tr(),
-        OrganizeErrorKind.notInvited => LocaleKeys.aiOrganize_notInvited.tr(),
-        OrganizeErrorKind.userLimit => LocaleKeys.aiOrganize_userLimit.tr(),
-        OrganizeErrorKind.globalLimit => LocaleKeys.aiOrganize_globalLimit.tr(),
-        OrganizeErrorKind.noteMissing => LocaleKeys.aiOrganize_noteMissing.tr(),
-        OrganizeErrorKind.tooLarge ||
-        OrganizeErrorKind.failed =>
-          LocaleKeys.aiOrganize_failed.tr(),
-      };
-
-  bool get _canRetry =>
-      const {
-        OrganizeErrorKind.notInvited,
-        OrganizeErrorKind.userLimit,
-        OrganizeErrorKind.globalLimit,
-      }.contains(_error) ==
-      false;
+  String _errorText() => organizeErrorKey(_error).tr();
 
   Widget _message(String text, [List<Widget> actions = const []]) => Padding(
         padding: const EdgeInsets.all(16),
@@ -213,27 +215,31 @@ class _OrganizeSheetState extends State<_OrganizeSheet> {
           const [CircularProgressIndicator()],
         );
       case _Phase.review:
-        return OrganizeProposalView(
-          proposal: _proposal!,
+        final p = _proposal!;
+        final stale = p.state == ProposalState.stale;
+        final view = OrganizeProposalView(
+          proposal: p,
           candidates: _candidates,
-          onApply: _apply,
+          applyLabel: stale ? LocaleKeys.aiOrganize_applyAnyway.tr() : null,
+          onApply: (d) => _apply(d, force: stale),
           onReject: _reject,
         );
-      case _Phase.stale:
-        return _message(LocaleKeys.aiOrganize_stale.tr(), [
-          FilledButton(
-            onPressed: _run,
-            child: Text(LocaleKeys.aiOrganize_rerun.tr()),
-          ),
-          if (_lastDecision != null)
-            OutlinedButton(
-              onPressed: () => _apply(_lastDecision!, force: true),
-              child: Text(LocaleKeys.aiOrganize_applyAnyway.tr()),
-            ),
-        ]);
+        if (!stale) return view;
+        return Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            _message(LocaleKeys.aiOrganize_stale.tr(), [
+              OutlinedButton(
+                onPressed: _run,
+                child: Text(LocaleKeys.aiOrganize_rerun.tr()),
+              ),
+            ]),
+            Flexible(child: view),
+          ],
+        );
       case _Phase.failed:
         return _message(_errorText(), [
-          if (_canRetry)
+          if (organizeCanRetry(_error))
             FilledButton(
               onPressed: _run,
               child: Text(LocaleKeys.aiOrganize_retry.tr()),

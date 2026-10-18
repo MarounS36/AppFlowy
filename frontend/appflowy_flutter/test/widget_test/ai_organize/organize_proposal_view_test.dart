@@ -76,4 +76,20 @@ void main() {
     expect(rejected, hasLength(1));
     expect(applied, isEmpty);
   });
+
+  testWidgets('apply is disabled when nothing would be sent', (tester) async {
+    final (applied, _) = await pump(tester);
+    await tester.tap(find.text('aiOrganize.folderRow'));
+    await tester.pump();
+    await tester.tap(find.text('aiOrganize.titleRow'));
+    await tester.pump();
+    await tester.tap(find.text('aiOrganize.applySelected'));
+    expect(applied, isEmpty);
+    // a blank title alone also disables Apply
+    await tester.tap(find.text('aiOrganize.titleRow'));
+    await tester.enterText(find.byType(TextField), '  ');
+    await tester.pump();
+    await tester.tap(find.text('aiOrganize.applySelected'));
+    expect(applied, isEmpty);
+  });
 }
