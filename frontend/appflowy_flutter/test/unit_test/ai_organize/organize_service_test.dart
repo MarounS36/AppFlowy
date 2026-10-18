@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:appflowy/core/config/kv.dart';
@@ -93,6 +94,10 @@ void main() {
   void noteIs(_Note? note) =>
       when(() => backend.readNote('n1')).thenAnswer((_) async => note);
 
+  void viewIs({String title = 'untitled', String parent = 'inbox'}) =>
+      when(() => backend.view('n1'))
+          .thenAnswer((_) async => _view('n1', parent, title));
+
   List<Map<String, dynamic>> sentBodies() => verify(
         () => api.organize(
           token: any(named: 'token'),
@@ -140,6 +145,8 @@ void main() {
     final s = service();
     final p = (await s.request('n1'))!;
     await s.apply(p.id, d);
+    // Undo compares title and parent only; it must not need the body.
+    when(() => backend.readNote(any())).thenThrow(FlowyError());
     return (s, (await s.state()).history.last.key);
   }
 
@@ -351,6 +358,32 @@ void main() {
     verifyNever(() => backend.rename(any(), any()));
   });
 
+  test('request keeps a proposal whose apply is in flight', () async {
+    final s = service();
+    final p = (await s.request('n1'))!;
+    final gate = Completer<_Note?>();
+    final reached = Completer<void>();
+    when(() => backend.readNote('n1')).thenAnswer((_) {
+      if (reached.isCompleted) return Future.value(_note());
+      reached.complete();
+      return gate.future;
+    });
+
+    final applying = s.apply(p.id, _both);
+    await reached.future; // apply is parked on its note re-read
+    final newer = (await s.request('n1'))!;
+    gate.complete(_note());
+
+    expect(await applying, ProposalState.applied);
+    final state = await s.state();
+    expect(state.proposals.map((x) => x.id), [p.id, newer.id]);
+    expect(state.proposals.first.state, ProposalState.applied);
+    expect(state.history.map((h) => h.proposalId), [p.id, p.id]);
+    final saved = await store().load();
+    expect(saved.proposals.first.state, ProposalState.applied);
+    expect(saved.history, hasLength(2));
+  });
+
   test('apply marks stale when note changed', () async {
     final s = service();
     final p = (await s.request('n1'))!;
@@ -367,6 +400,15 @@ void main() {
       () => backend.move('n1', parentId: 'home'),
     ).called(1);
     expect((await s.state()).history.first.before, 'Shopping');
+  });
+
+  test('apply force on needsReview still checks staleness', () async {
+    final s = service();
+    final p = (await s.request('n1'))!;
+    noteIs(_note(title: 'Shopping'));
+
+    expect(await s.apply(p.id, _both, force: true), ProposalState.stale);
+    verifyNoWrites();
   });
 
   test('apply skips no-op rename', () async {
@@ -460,7 +502,7 @@ void main() {
 
   test('undo restores title when unchanged since', () async {
     final (s, key) = await applied(const OrganizeDecision(title: 'Groceries'));
-    noteIs(_note(title: 'Groceries'));
+    viewIs(title: 'Groceries');
 
     expect(await s.undo(key), UndoResult.undone);
     verify(() => backend.rename('n1', 'untitled')).called(1);
@@ -469,7 +511,7 @@ void main() {
 
   test('undo reports conflict when title changed since', () async {
     final (s, key) = await applied(const OrganizeDecision(title: 'Groceries'));
-    noteIs(_note(title: 'Other'));
+    viewIs(title: 'Other');
 
     expect(await s.undo(key), UndoResult.conflict);
     verifyNever(() => backend.rename('n1', 'untitled'));
@@ -479,7 +521,7 @@ void main() {
   test('undo restores folder after its previous sibling', () async {
     noteIs(_note(prev: 'p0'));
     final (s, key) = await applied(const OrganizeDecision(folderId: 'home'));
-    noteIs(_note(parent: 'home'));
+    viewIs(parent: 'home');
     when(() => backend.view('p0'))
         .thenAnswer((_) async => _view('p0', 'inbox', 'P0'));
 
@@ -492,7 +534,7 @@ void main() {
   test('undo drops previous sibling that moved away', () async {
     noteIs(_note(prev: 'p0'));
     final (s, key) = await applied(const OrganizeDecision(folderId: 'home'));
-    noteIs(_note(parent: 'home'));
+    viewIs(parent: 'home');
     when(() => backend.view('p0'))
         .thenAnswer((_) async => _view('p0', 'home', 'P0'));
 
@@ -504,7 +546,7 @@ void main() {
 
   test('undo reports conflict when original parent is gone', () async {
     final (s, key) = await applied(const OrganizeDecision(folderId: 'home'));
-    noteIs(_note(parent: 'home'));
+    viewIs(parent: 'home');
     when(() => backend.view('inbox')).thenAnswer((_) async => null);
 
     expect(await s.undo(key), UndoResult.conflict);
@@ -520,7 +562,7 @@ void main() {
   test('undo reports conflict when original parent moved under the note',
       () async {
     final (s, key) = await applied(const OrganizeDecision(folderId: 'home'));
-    noteIs(_note(parent: 'home'));
+    viewIs(parent: 'home');
     when(() => backend.view('inbox'))
         .thenAnswer((_) async => _view('inbox', 'n1', 'Inbox'));
 
@@ -534,9 +576,17 @@ void main() {
     );
   });
 
+  test('undo reports conflict when note is gone', () async {
+    final (s, key) = await applied(const OrganizeDecision(title: 'Groceries'));
+    when(() => backend.view('n1')).thenAnswer((_) async => null);
+
+    expect(await s.undo(key), UndoResult.conflict);
+    verifyNever(() => backend.rename('n1', 'untitled'));
+  });
+
   test('undo twice returns alreadyUndone', () async {
     final (s, key) = await applied(const OrganizeDecision(title: 'Groceries'));
-    noteIs(_note(title: 'Groceries'));
+    viewIs(title: 'Groceries');
 
     expect(await s.undo(key), UndoResult.undone);
     expect(await s.undo(key), UndoResult.alreadyUndone);

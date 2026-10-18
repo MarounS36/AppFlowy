@@ -43,6 +43,9 @@ class OrganizeService {
   final OrganizeApi _api;
   Future<OrganizeState>? _state;
 
+  /// Proposals whose apply is in flight; a re-run must not drop them.
+  final _applying = <String>{};
+
   static final _byUser = <String, OrganizeService>{};
 
   /// Null when Env.inknestOrganizeUrl is empty or the user has no auth token.
@@ -197,8 +200,9 @@ class OrganizeService {
   }
 
   /// Applies the accepted (non-null) fields of [decision]. Runs only from
-  /// `needsReview`, or from `stale` with [force]; otherwise returns the
-  /// current state untouched. Throws StateError for an unknown id.
+  /// `needsReview`, or from `stale` with [force] ("Apply anyway", which then
+  /// skips the stale check); otherwise returns the current state untouched.
+  /// Throws StateError for an unknown id.
   Future<ProposalState> apply(
     String proposalId,
     OrganizeDecision decision, {
@@ -206,12 +210,12 @@ class OrganizeService {
   }) async {
     final state = await this.state();
     final p = state.proposals.firstWhere((p) => p.id == proposalId);
-    final allowed = p.state == ProposalState.needsReview ||
-        (force && p.state == ProposalState.stale);
-    if (!allowed) return p.state;
+    final applyAnyway = force && p.state == ProposalState.stale;
+    if (p.state != ProposalState.needsReview && !applyAnyway) return p.state;
     p
       ..state = ProposalState.processing
       ..error = null;
+    _applying.add(p.id);
 
     var performed = false;
     Future<void> record(HistoryEntry entry) async {
@@ -227,7 +231,7 @@ class OrganizeService {
         p
           ..state = ProposalState.failed
           ..error = OrganizeErrorKind.noteMissing;
-      } else if (!force && isStale(p.snapshot, note.snapshot)) {
+      } else if (!applyAnyway && isStale(p.snapshot, note.snapshot)) {
         p.state = ProposalState.stale;
       } else {
         final now = note.snapshot;
@@ -287,6 +291,8 @@ class OrganizeService {
         ..state =
             performed ? ProposalState.partiallyApplied : ProposalState.failed
         ..error = OrganizeErrorKind.failed;
+    } finally {
+      _applying.remove(p.id);
     }
     await _store.save(state);
     return p.state;
@@ -322,17 +328,23 @@ class OrganizeService {
     final entry = state.history.firstWhere((h) => h.key == historyKey);
     if (entry.undone) return UndoResult.alreadyUndone;
 
-    final note = await _backend.readNote(entry.noteId);
-    if (note == null) return UndoResult.conflict;
+    // Only title and parent matter here, so don't read the body.
+    final view = await _backend.view(entry.noteId);
+    if (view == null) return UndoResult.conflict;
+    final now = NoteSnapshot(
+      title: view.name,
+      parentId: view.parentViewId,
+      bodyHash: '',
+    );
     switch (entry.field) {
       case OrganizeField.title:
-        if (!canUndo(entry, note.snapshot, beforeParentExists: true)) {
+        if (!canUndo(entry, now, beforeParentExists: true)) {
           return UndoResult.conflict;
         }
         await _backend.rename(entry.noteId, entry.before);
       case OrganizeField.folder:
         final parentOk = await _canHost(entry.before, entry.noteId);
-        if (!canUndo(entry, note.snapshot, beforeParentExists: parentOk)) {
+        if (!canUndo(entry, now, beforeParentExists: parentOk)) {
           return UndoResult.conflict;
         }
         final prev = entry.beforePrevSiblingId;
@@ -347,6 +359,16 @@ class OrganizeService {
     entry.undone = true;
     await _store.save(state);
     return UndoResult.undone;
+  }
+
+  void _replaceOpen(OrganizeState s, String noteId, OrganizeProposal? p) {
+    s.proposals.removeWhere(
+      (x) =>
+          x.noteId == noteId &&
+          _open.contains(x.state) &&
+          !_applying.contains(x.id),
+    );
+    if (p != null) s.proposals.add(p);
   }
 
   Future<List<FolderCandidate>> _editableCandidates(
@@ -373,11 +395,6 @@ class OrganizeService {
     }
     return true;
   }
-}
-
-void _replaceOpen(OrganizeState s, String noteId, OrganizeProposal? p) {
-  s.proposals.removeWhere((x) => x.noteId == noteId && _open.contains(x.state));
-  if (p != null) s.proposals.add(p);
 }
 
 /// Rejections are kept per note for one body hash; a new hash starts over.
