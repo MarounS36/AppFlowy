@@ -1,6 +1,6 @@
 import { assertEquals } from "jsr:@std/assert@1";
 import { MAX_BODY_BYTES } from "./core.ts";
-import { type Deps, handle } from "./handler.ts";
+import { type Deps, handle, type LogEntry } from "./handler.ts";
 
 const OK = '{"title":"T","folder_id":"f1","reason":"r"}';
 const NOTE = {
@@ -15,7 +15,7 @@ const NOTE = {
 };
 
 function fakeDeps(o: Partial<Deps> = {}) {
-  const logs: { user: string | null; status: number; ms: number }[] = [];
+  const logs: LogEntry[] = [];
   const calls = { consume: 0, complete: 0 };
   const deps: Deps = {
     getProfile: () => Promise.resolve({ uuid: "u1", email: "a@b.c" }),
@@ -108,14 +108,28 @@ Deno.test("provider failure returns 502", async () => {
   await expectErr(await handle(post(NOTE), b.deps), 502, "ai_failed");
 });
 
-Deno.test("dependency failure returns 502", async () => {
+Deno.test("dependency failure returns 502 and logs which step", async () => {
   const boom = () => Promise.reject(new Error("boom"));
   for (
-    const o of [{ getProfile: boom }, { isInvited: boom }, { consume: boom }]
+    const [o, cause] of [
+      [{ getProfile: boom }, "profile"],
+      [{ isInvited: boom }, "allowlist"],
+      [{ consume: boom }, "usage"],
+      [{ complete: () => Promise.resolve("nonsense") }, "ai_output"],
+    ] as const
   ) {
-    const { deps } = fakeDeps(o);
+    const { deps, logs } = fakeDeps(o);
     await expectErr(await handle(post(NOTE), deps), 502, "ai_failed");
+    assertEquals(logs.map((e) => e.cause), [cause]);
   }
+});
+
+Deno.test("provider throw logs cause ai, not the error message", async () => {
+  const { deps, logs } = fakeDeps({
+    complete: () => Promise.reject(new Error("provider said: secret body")),
+  });
+  await expectErr(await handle(post(NOTE), deps), 502, "ai_failed");
+  assertEquals(logs, [{ user: "u1", status: 502, ms: 0, cause: "ai" }]);
 });
 
 Deno.test("forged folder id is dropped", async () => {
@@ -153,12 +167,29 @@ Deno.test("success returns suggestion", async () => {
 });
 
 Deno.test("logs never contain note content", async () => {
-  const { deps, logs } = fakeDeps();
-  await handle(post(NOTE), deps);
-  const s = JSON.stringify(logs);
-  assertEquals(s.includes("Secret title") || s.includes("secret body"), false);
-  assertEquals(logs.length, 1);
-  for (const e of logs) {
-    assertEquals(Object.keys(e).sort(), ["ms", "status", "user"]);
+  const leak = () => Promise.reject(new Error("Secret title secret body A/B"));
+  for (
+    const o of [
+      {},
+      { complete: leak },
+      { consume: leak },
+      { complete: () => Promise.resolve("nonsense") },
+    ]
+  ) {
+    const { deps, logs } = fakeDeps(o);
+    await handle(post(NOTE), deps);
+    const s = JSON.stringify(logs);
+    for (const secret of ["Secret title", "secret body", "A/B", "boom"]) {
+      assertEquals(s.includes(secret), false);
+    }
+    assertEquals(logs.length, 1);
+    for (const e of logs) {
+      assertEquals(
+        Object.keys(e).sort(),
+        e.status === 502
+          ? ["cause", "ms", "status", "user"]
+          : ["ms", "status", "user"],
+      );
+    }
   }
 });
