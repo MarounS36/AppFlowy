@@ -17,6 +17,7 @@ import 'package:appflowy/mobile/presentation/search/mobile_search_page.dart';
 import 'package:appflowy/mobile/presentation/setting/cloud/appflowy_cloud_page.dart';
 import 'package:appflowy/mobile/presentation/setting/font/font_picker_screen.dart';
 import 'package:appflowy/mobile/presentation/setting/language/language_picker_screen.dart';
+import 'package:appflowy/features/ai_organize/presentation/organize_list_page.dart';
 import 'package:appflowy/mobile/presentation/setting/launch_settings_page.dart';
 import 'package:appflowy/mobile/presentation/setting/workspace/add_members_screen.dart';
 import 'package:appflowy/mobile/presentation/setting/workspace/invite_members_screen.dart';
@@ -64,6 +65,8 @@ GoRouter generateRouter(Widget child) {
         _mobileHomeSettingPageRoute(),
         _mobileCloudSettingAppFlowyCloudPageRoute(),
         _mobileLaunchSettingsPageRoute(),
+        _organizeListRoute(OrganizeListPage.needsReviewRouteName, false),
+        _organizeListRoute(OrganizeListPage.historyRouteName, true),
         _mobileFeatureFlagPageRoute(),
 
         // view page
@@ -290,6 +293,17 @@ GoRoute _mobileLaunchSettingsPageRoute() {
         name: MobileLaunchSettingsPage.routeName,
       );
     },
+  );
+}
+
+GoRoute _organizeListRoute(String path, bool showHistory) {
+  return GoRoute(
+    parentNavigatorKey: AppGlobals.rootNavKey,
+    path: path,
+    pageBuilder: (context, state) => MaterialExtendedPage(
+      child: OrganizeListPage(showHistory: showHistory),
+      name: path,
+    ),
   );
 }
 
