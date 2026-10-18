@@ -116,11 +116,12 @@ void main() {
     );
   }
 
-  setUp(() {
+  setUp(() async {
     TestWidgetsFlutterBinding.ensureInitialized();
     SharedPreferences.setMockInitialValues({});
     Log.shared.disableLog = true;
     kv = DartKeyValue();
+    await store().save(OrganizeState(consented: true));
     backend = _MockBackend();
     api = _MockApi();
     final byId = {for (final v in _views) v.id: v};
@@ -229,6 +230,30 @@ void main() {
       ),
     );
   });
+
+  for (final (name, off) in [
+    ('switched off', OrganizeState(enabled: false, consented: true)),
+    ('not consented', OrganizeState()),
+  ]) {
+    test('request sends nothing when $name', () async {
+      await store().save(off);
+      await expectLater(
+        service().request('n1'),
+        throwsA(
+          isA<OrganizeApiException>()
+              .having((e) => e.kind, 'kind', OrganizeErrorKind.failed),
+        ),
+      );
+      verifyNever(
+        () => api.organize(
+          token: any(named: 'token'),
+          body: any(named: 'body'),
+        ),
+      );
+      verifyNever(() => backend.readNote(any()));
+      expect((await store().load()).proposals, isEmpty);
+    });
+  }
 
   test('request sends exclude only while body hash unchanged', () async {
     final s = service();

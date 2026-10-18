@@ -17,6 +17,7 @@ class OrganizeProposalView extends StatefulWidget {
     required this.onApply,
     required this.onReject,
     this.applyLabel,
+    this.initialDecision,
   });
 
   final OrganizeProposal proposal;
@@ -27,17 +28,27 @@ class OrganizeProposalView extends StatefulWidget {
   /// Overrides the Apply button text (e.g. "Apply anyway" for a stale proposal).
   final String? applyLabel;
 
+  /// The user's earlier choices (checkboxes, title, folder) to start from
+  /// instead of the AI's, e.g. when a submitted proposal came back stale.
+  final OrganizeDecision? initialDecision;
+
   @override
   State<OrganizeProposalView> createState() => _OrganizeProposalViewState();
 }
 
 class _OrganizeProposalViewState extends State<OrganizeProposalView> {
+  late final OrganizeProposal _p = widget.proposal;
+  late final OrganizeDecision? _seed = widget.initialDecision;
   late final TextEditingController _title =
-      TextEditingController(text: widget.proposal.proposedTitle);
-  late String? _folderId = widget.proposal.proposedFolderId;
-  late String? _folderPath = widget.proposal.proposedFolderPath;
-  late bool _titleChecked = widget.proposal.proposedTitle != null;
-  late bool _folderChecked = widget.proposal.proposedFolderId != null;
+      TextEditingController(text: _seed?.title ?? _p.proposedTitle);
+  late String? _folderId = _seed?.folderId ?? _p.proposedFolderId;
+  late String? _folderPath = _folderId == _p.proposedFolderId
+      ? _p.proposedFolderPath
+      : widget.candidates.where((c) => c.id == _folderId).firstOrNull?.path;
+  late bool _titleChecked =
+      _p.proposedTitle != null && (_seed == null || _seed.title != null);
+  late bool _folderChecked =
+      _p.proposedFolderId != null && (_seed == null || _seed.folderId != null);
 
   @override
   void dispose() {

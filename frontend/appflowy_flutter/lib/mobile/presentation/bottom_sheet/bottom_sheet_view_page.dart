@@ -130,8 +130,7 @@ class MobileViewBottomSheetBody extends StatelessWidget {
           ),
         ),
         _divider(),
-        if (view.layout == ViewLayoutPB.Document &&
-            (context.watch<PageAccessLevelBloc?>()?.state.isEditable ?? true))
+        if (view.layout == ViewLayoutPB.Document && isEditable)
           FutureBuilder<bool>(
             future: OrganizeService.isAvailable(),
             builder: (context, snapshot) {

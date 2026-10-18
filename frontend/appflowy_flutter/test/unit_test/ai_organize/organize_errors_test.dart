@@ -18,15 +18,11 @@ void main() {
     expected.forEach((k, v) => expect(organizeErrorKey(k), v, reason: k.name));
   });
 
-  test('retry is false only for notInvited, userLimit, globalLimit', () {
+  test('retry is true only for unauthorized and failed', () {
     for (final k in OrganizeErrorKind.values) {
       expect(
         organizeCanRetry(k),
-        !{
-          OrganizeErrorKind.notInvited,
-          OrganizeErrorKind.userLimit,
-          OrganizeErrorKind.globalLimit,
-        }.contains(k),
+        {OrganizeErrorKind.unauthorized, OrganizeErrorKind.failed}.contains(k),
         reason: k.name,
       );
     }

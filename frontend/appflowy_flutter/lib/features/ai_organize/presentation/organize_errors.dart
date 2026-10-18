@@ -13,9 +13,9 @@ String organizeErrorKey(OrganizeErrorKind kind) => switch (kind) {
         LocaleKeys.aiOrganize_failed,
     };
 
-/// Retrying cannot help when the user is not invited or a limit is hit.
-bool organizeCanRetry(OrganizeErrorKind kind) => !const {
-      OrganizeErrorKind.notInvited,
-      OrganizeErrorKind.userLimit,
-      OrganizeErrorKind.globalLimit,
+/// Retrying can only help after a token refresh or a transient failure; not
+/// when uninvited, at a limit, the note is gone or too large.
+bool organizeCanRetry(OrganizeErrorKind kind) => const {
+      OrganizeErrorKind.unauthorized,
+      OrganizeErrorKind.failed,
     }.contains(kind);

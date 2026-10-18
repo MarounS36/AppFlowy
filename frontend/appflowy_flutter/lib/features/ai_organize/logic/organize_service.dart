@@ -90,8 +90,8 @@ class OrganizeService {
   /// Replaces any open (processing/needsReview/stale/failed) proposal for the
   /// note. Returns null when the AI has nothing to suggest (nothing stored).
   /// AI failures come back as a `failed` proposal; a missing note throws
-  /// OrganizeApiException(noteMissing), other read errors
-  /// OrganizeApiException(failed). Never writes to the note.
+  /// OrganizeApiException(noteMissing); switched off, not consented or other
+  /// read errors throw OrganizeApiException(failed). Never writes to the note.
   Future<OrganizeProposal?> request(String noteId) async {
     try {
       return await _request(noteId);
@@ -105,6 +105,10 @@ class OrganizeService {
 
   Future<OrganizeProposal?> _request(String noteId) async {
     final state = await this.state();
+    // Switch off or no consent: send nothing (every Retry/Re-run comes here).
+    if (!state.enabled || !state.consented) {
+      throw const OrganizeApiException(OrganizeErrorKind.failed);
+    }
     final note = await _backend.readNote(noteId);
     if (note == null) {
       throw const OrganizeApiException(OrganizeErrorKind.noteMissing);

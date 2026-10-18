@@ -100,6 +100,13 @@ class _OrganizeSheetState extends State<_OrganizeSheet> {
   List<FolderCandidate> _candidates = const [];
   OrganizeErrorKind _error = OrganizeErrorKind.failed;
 
+  /// What the user last submitted; reseeds the view when it comes back stale.
+  OrganizeDecision? _lastDecision;
+
+  /// False when opened from Needs review with the switch off (or no consent):
+  /// Retry / Re-run would only fail, so they are hidden.
+  bool _canRequest = true;
+
   @override
   void initState() {
     super.initState();
@@ -109,6 +116,7 @@ class _OrganizeSheetState extends State<_OrganizeSheet> {
   // The request keeps running in the service if the sheet is closed; every
   // post-await UI touch below is guarded by `mounted`.
   Future<void> _run() async {
+    _lastDecision = null;
     setState(() => _phase = _Phase.working);
     try {
       await _show(await widget.service.request(widget.noteId));
@@ -123,6 +131,7 @@ class _OrganizeSheetState extends State<_OrganizeSheet> {
     try {
       final s = await widget.service.state();
       if (!mounted) return;
+      _canRequest = s.enabled && s.consented;
       await _show(s.proposals.where((p) => p.id == id).firstOrNull);
     } catch (_) {
       _fail(OrganizeErrorKind.failed);
@@ -153,6 +162,8 @@ class _OrganizeSheetState extends State<_OrganizeSheet> {
   void _fail(OrganizeErrorKind kind) {
     if (!mounted) return;
     setState(() {
+      // Not a stored failed proposal, so Dismiss has nothing to reject.
+      _proposal = null;
       _error = kind;
       _phase = _Phase.failed;
     });
@@ -161,6 +172,7 @@ class _OrganizeSheetState extends State<_OrganizeSheet> {
   Future<void> _apply(OrganizeDecision d, {bool force = false}) async {
     final p = _proposal!;
     if (_phase == _Phase.working) return;
+    _lastDecision = d;
     setState(() => _phase = _Phase.working);
     ProposalState result;
     try {
@@ -169,8 +181,9 @@ class _OrganizeSheetState extends State<_OrganizeSheet> {
       result = ProposalState.failed;
     }
     switch (result) {
-      case ProposalState.applied:
-      case ProposalState.partiallyApplied:
+      // partiallyApplied with an error means a write failed midway.
+      case ProposalState.applied || ProposalState.partiallyApplied
+          when p.error == null:
         showToastNotification(message: LocaleKeys.aiOrganize_applied.tr());
       case ProposalState.stale:
         // The proposal object is now stale; show it with Re-run / Apply anyway.
@@ -185,10 +198,11 @@ class _OrganizeSheetState extends State<_OrganizeSheet> {
     if (mounted) Navigator.of(context).pop();
   }
 
+  /// Reject / Dismiss: rejects the shown proposal (if any) and closes.
   Future<void> _reject() async {
-    final p = _proposal!;
+    final p = _proposal;
     try {
-      await widget.service.reject(p.id);
+      if (p != null) await widget.service.reject(p.id);
     } catch (_) {}
     if (mounted) Navigator.of(context).pop();
   }
@@ -223,27 +237,33 @@ class _OrganizeSheetState extends State<_OrganizeSheet> {
           applyLabel: stale ? LocaleKeys.aiOrganize_applyAnyway.tr() : null,
           onApply: (d) => _apply(d, force: stale),
           onReject: _reject,
+          initialDecision: stale ? _lastDecision : null,
         );
         if (!stale) return view;
         return Column(
           mainAxisSize: MainAxisSize.min,
           children: [
             _message(LocaleKeys.aiOrganize_stale.tr(), [
-              OutlinedButton(
-                onPressed: _run,
-                child: Text(LocaleKeys.aiOrganize_rerun.tr()),
-              ),
+              if (_canRequest)
+                OutlinedButton(
+                  onPressed: _run,
+                  child: Text(LocaleKeys.aiOrganize_rerun.tr()),
+                ),
             ]),
             Flexible(child: view),
           ],
         );
       case _Phase.failed:
         return _message(_errorText(), [
-          if (organizeCanRetry(_error))
+          if (_canRequest && organizeCanRetry(_error))
             FilledButton(
               onPressed: _run,
               child: Text(LocaleKeys.aiOrganize_retry.tr()),
             ),
+          OutlinedButton(
+            onPressed: _reject,
+            child: Text(LocaleKeys.aiOrganize_reject.tr()),
+          ),
         ]);
       case _Phase.nothing:
         return _message(LocaleKeys.aiOrganize_nothingToSuggest.tr());

@@ -78,6 +78,17 @@ class _OrganizeListPageState extends State<OrganizeListPage> {
     if (mounted) await _load();
   }
 
+  String _noteTitle(String title) =>
+      title.isEmpty ? LocaleKeys.menuAppHeader_defaultNewPageName.tr() : title;
+
+  /// Folder rows name the note ("Groceries: Inbox → Home"); title rows
+  /// already do ("old → new").
+  String _historyText(HistoryEntry e, Map<String, OrganizeProposal> byId) {
+    final change = '${e.beforeLabel} → ${e.afterLabel}';
+    if (e.field == OrganizeField.title) return change;
+    return '${_noteTitle(byId[e.proposalId]?.snapshot.title ?? '')}: $change';
+  }
+
   String _summary(OrganizeProposal p) {
     final parts = [
       if (p.proposedTitle != null) p.proposedTitle!,
@@ -95,10 +106,11 @@ class _OrganizeListPageState extends State<OrganizeListPage> {
     } else if (widget.showHistory) {
       final entries = [...state.history]
         ..sort((a, b) => b.appliedAt.compareTo(a.appliedAt));
+      final byId = {for (final p in state.proposals) p.id: p};
       rows = [
         for (final e in entries)
           ListTile(
-            title: Text('${e.beforeLabel} → ${e.afterLabel}'),
+            title: Text(_historyText(e, byId)),
             trailing: e.undone
                 ? Text(LocaleKeys.aiOrganize_undone.tr())
                 : TextButton(
@@ -120,11 +132,7 @@ class _OrganizeListPageState extends State<OrganizeListPage> {
       rows = [
         for (final p in proposals)
           ListTile(
-            title: Text(
-              p.snapshot.title.isEmpty
-                  ? LocaleKeys.menuAppHeader_defaultNewPageName.tr()
-                  : p.snapshot.title,
-            ),
+            title: Text(_noteTitle(p.snapshot.title)),
             subtitle: Text(_summary(p), maxLines: 1),
             onTap: () => _review(p),
           ),
