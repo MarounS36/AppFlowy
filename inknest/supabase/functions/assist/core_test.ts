@@ -93,7 +93,7 @@ Deno.test("temp ids must be bound earlier", () => {
     type: "board.create",
     temp_id: "new:1",
     name: "N",
-    columns: ["A", "B"],
+    columns: [{ temp_id: "new:5", name: "A" }, { temp_id: "new:6", name: "B" }],
   };
   assertEquals(
     types(
@@ -215,7 +215,7 @@ Deno.test("databases, writable cells and row.remove", () => {
       parent_id: "s1",
       name: "L",
       layout: "grid",
-      fields: [{ name: "A", type: "text" }],
+      fields: [{ temp_id: "new:20", name: "A", type: "text" }],
     },
     {
       type: "database.create",
@@ -231,7 +231,7 @@ Deno.test("databases, writable cells and row.remove", () => {
       parent_id: "s1",
       name: "L",
       layout: "grid",
-      fields: [{ name: "A", type: "url" }],
+      fields: [{ temp_id: "new:21", name: "A", type: "url" }],
     },
     {
       type: "row.add",
@@ -340,5 +340,136 @@ Deno.test("validateAssistReply", () => {
       actions: [{ type: "calendar.remove", entry_id: "e1" }],
     }, req),
     { note: "", actions: [{ type: "calendar.remove", entry_id: "e1" }] },
+  );
+});
+
+Deno.test("new board columns and database fields are declared", () => {
+  const mk = {
+    type: "board.create",
+    temp_id: "new:1",
+    name: "Move",
+    columns: [{ temp_id: "new:2", name: "To do" }, {
+      temp_id: "new:3",
+      name: "Done",
+    }],
+  };
+  const card = (b: string, c: string, t: string) => ({
+    type: "board.card.add",
+    board_id: b,
+    column_id: c,
+    temp_id: t,
+    title: "Pack",
+  });
+  assertEquals(types(v([mk, card("new:1", "new:2", "new:4")])).length, 2);
+  assertEquals(types(v([mk, card("b1", "new:3", "new:4")])), ["board.create"]);
+  const dup = {
+    ...mk,
+    columns: [{ temp_id: "new:2", name: "A" }, { temp_id: "new:2", name: "B" }],
+  };
+  assertEquals(v([dup]).length, 0);
+  assertEquals(v([{ ...mk, columns: ["A"] }]).length, 0);
+  const db = {
+    type: "database.create",
+    temp_id: "new:5",
+    parent_id: "s1",
+    name: "L",
+    layout: "grid",
+    fields: [{ temp_id: "new:6", name: "A", type: "select" }],
+  };
+  assertEquals(
+    types(v([
+      db,
+      {
+        type: "row.add",
+        database_id: "new:5",
+        temp_id: "new:7",
+        cells: { "new:6": "x" },
+      },
+      {
+        type: "option.add",
+        database_id: "new:5",
+        field_id: "new:6",
+        name: "o",
+      },
+      {
+        type: "field.rename",
+        database_id: "new:5",
+        field_id: "new:6",
+        name: "B",
+      },
+      {
+        type: "row.add",
+        database_id: "d1",
+        temp_id: "new:8",
+        cells: { "new:6": "x" },
+      },
+    ])),
+    ["database.create", "row.add", "option.add", "field.rename"],
+  );
+});
+
+Deno.test("removed items are no longer valid", () => {
+  assertEquals(
+    types(v([
+      { type: "calendar.remove", entry_id: "e1" },
+      { type: "calendar.update", entry_id: "e1", title: "x" },
+      { type: "board.column.remove", board_id: "b1", column_id: "c1" },
+      {
+        type: "board.card.add",
+        board_id: "b1",
+        column_id: "c1",
+        temp_id: "new:1",
+        title: "x",
+      },
+      { type: "board.card.remove", board_id: "b1", card_id: "k1" },
+      { type: "board.card.update", board_id: "b1", card_id: "k1", title: "x" },
+      { type: "row.remove", database_id: "d1", row_id: "r1" },
+      {
+        type: "row.update",
+        database_id: "d1",
+        row_id: "r1",
+        cells: { f1: "b" },
+      },
+      { type: "page.delete", page_id: "p1" },
+      { type: "page.rename", page_id: "p1", name: "x" },
+    ])),
+    [
+      "calendar.remove",
+      "board.column.remove",
+      "board.card.remove",
+      "row.remove",
+      "page.delete",
+    ],
+  );
+});
+
+Deno.test("prompt documents value shapes", () => {
+  const [sys] = buildAssistMessages(req);
+  assertStringIncludes(sys.content, '[{"temp_id": "new:N", "name": string}]');
+  assertStringIncludes(sys.content, "grid|board|calendar");
+  assertStringIncludes(sys.content, "multi_select");
+});
+
+Deno.test("prototype-named types and ids are inert", () => {
+  const r = {
+    ...req,
+    allowed_actions: ["constructor", "__proto__", "calendar.remove"],
+  };
+  assertEquals(
+    v(
+      [{ type: "constructor" }, { type: "__proto__" }, { type: "toString" }],
+      r,
+    ),
+    [],
+  );
+  assertEquals(v([{ type: "calendar.remove", entry_id: "__proto__" }], r), []);
+  assertEquals(
+    v([{
+      type: "row.add",
+      database_id: "d1",
+      temp_id: "new:1",
+      cells: JSON.parse('{"__proto__":"x"}'),
+    }]),
+    [],
   );
 });

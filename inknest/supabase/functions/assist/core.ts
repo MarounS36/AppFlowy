@@ -7,6 +7,7 @@ import {
   MAX_ACTIONS,
   MAX_TITLE,
   validateActionList,
+  valueShapes,
 } from "./catalogue.ts";
 export { type Action, ACTION_TYPES };
 
@@ -133,6 +134,7 @@ Rules:
 - Reply with only JSON: {"note": string, "actions": [...]}. "note" is one or two short sentences for the user.
 - Use only these action types, with exactly these fields (omit "?" fields you do not need):
 ${req.allowed_actions.map((t) => "  - " + describeAction(t)).join("\n")}
+${valueShapes(req.allowed_actions)}
 - At most ${MAX_ACTIONS} actions. Names and titles are one line of at most ${MAX_TITLE} characters.
 - Every *_id must be copied exactly from DATA, or be a "new:N" id (new:1, new:2, ...) that an EARLIER action declared as its temp_id. Never invent ids.
 - Dates are YYYY-MM-DD inside the week starting at context.week_start; times are 24-hour HH:MM.

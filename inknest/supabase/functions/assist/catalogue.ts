@@ -50,7 +50,42 @@ const SPEC: Record<string, { f: string; any?: boolean }> = {
 };
 export const ACTION_TYPES: readonly string[] = Object.keys(SPEC);
 export const describeAction = (t: string) =>
-  `${t}(${SPEC[t].f.split(" ").join(", ")})`;
+  Object.hasOwn(SPEC, t) ? `${t}(${SPEC[t].f.split(" ").join(", ")})` : t;
+
+// [action types it applies to (prefix match), line]
+const SHAPES: [string[], string][] = [
+  [
+    [""],
+    '- temp_id: "new:N", unique across the whole list (new:1, new:2, ...).',
+  ],
+  [
+    ["board.create"],
+    '- columns: [{"temp_id": "new:N", "name": string}]; each temp_id is a column id of the new board.',
+  ],
+  [
+    ["database.create"],
+    '- fields: [{"temp_id": "new:N", "name": string, "type": string}]; each temp_id is a field id of the new table.',
+  ],
+  [["row."], '- cells: {"<field_id>": string}.'],
+  [["database.create"], "- layout: grid|board|calendar."],
+  [
+    ["database.create", "field.add"],
+    '- field_type and field "type": text|number|date|select|multi_select|checkbox.',
+  ],
+  [["page.favorite"], "- on: true or false."],
+  [
+    ["calendar."],
+    "- date: YYYY-MM-DD. start/end: HH:MM 24-hour, null or omitted when all_day is true.",
+  ],
+  [
+    ["page.create", "page.append"],
+    "- content: markdown (headings, paragraphs, bullet/numbered lists, to-do items).",
+  ],
+];
+export const valueShapes = (allowed: string[]) =>
+  "Value shapes:\n" +
+  SHAPES.filter(([ps]) => ps.some((p) => allowed.some((t) => t.startsWith(p))))
+    .map(([, l]) => l).join("\n");
 
 const ID_KIND: Record<string, string> = {
   entry_id: "entry",
@@ -159,17 +194,29 @@ function checkField(key: string, v: unknown, out: Action, st: State): unknown {
     case "field_type":
       return FIELD_TYPES.includes(v as string) ? v : undefined;
     case "columns":
-      return Array.isArray(v) && v.length >= 1 && v.length <= 20 &&
-          v.every((x) => line(x))
-        ? v.map((x) => line(x))
-        : undefined;
-    case "fields":
-      return Array.isArray(v) && v.length <= 30 &&
-          v.every((x) =>
-            isObj(x) && line(x.name) && FIELD_TYPES.includes(x.type as string)
-          )
-        ? v.map((x) => ({ name: line(x.name), type: x.type }))
-        : undefined;
+    case "fields": {
+      const cols = key === "columns";
+      if (
+        !Array.isArray(v) || v.length > (cols ? 20 : 30) || (cols && !v.length)
+      ) return undefined;
+      const seen = new Set<string>([out.temp_id as string]);
+      const items: Record<string, unknown>[] = [];
+      for (const x of v) {
+        if (!isObj(x) || !line(x.name) || !isStr(x.temp_id)) return undefined;
+        if (
+          !/^new:\d+$/.test(x.temp_id) || st.temps.has(x.temp_id) ||
+          seen.has(x.temp_id)
+        ) return undefined;
+        if (!cols && !FIELD_TYPES.includes(x.type as string)) return undefined;
+        seen.add(x.temp_id);
+        items.push(
+          cols
+            ? { temp_id: x.temp_id, name: line(x.name) }
+            : { temp_id: x.temp_id, name: line(x.name), type: x.type },
+        );
+      }
+      return items;
+    }
     case "cells": {
       if (!isObj(v) || Object.keys(v).length > 50) return undefined;
       const db = st.dbs.get(out.database_id as string);
@@ -214,14 +261,39 @@ function crossCheck(a: Action, st: State): boolean {
 
 /** Registers what a kept action creates so later actions can use its new:N id. */
 function declare(a: Action, st: State) {
+  const board = st.boards.get(a.board_id as string);
+  const db = st.dbs.get(a.database_id as string);
+  switch (a.type) { // removals: later actions must not reference the id
+    case "calendar.remove":
+      st.entries.delete(a.entry_id as string);
+      return;
+    case "board.card.remove":
+      board!.cards.delete(a.card_id as string);
+      return;
+    case "board.column.remove":
+      board!.columns.delete(a.column_id as string);
+      return;
+    case "row.remove":
+      db!.rows.delete(a.row_id as string);
+      return;
+    case "page.delete":
+      st.pages.delete(a.page_id as string);
+      return;
+  }
   const tmp = a.temp_id as string | undefined;
   if (!tmp) return;
   st.temps.add(tmp);
-  const board = st.boards.get(a.board_id as string);
-  const db = st.dbs.get(a.database_id as string);
+  const kids = (a.columns ?? a.fields ?? []) as {
+    temp_id: string;
+    type?: string;
+  }[];
+  for (const k of kids) st.temps.add(k.temp_id);
   switch (a.type) {
     case "board.create":
-      st.boards.set(tmp, { columns: new Set(), cards: new Set() });
+      st.boards.set(tmp, {
+        columns: new Set(kids.map((k) => k.temp_id)),
+        cards: new Set(),
+      });
       break;
     case "board.column.add":
       board!.columns.add(tmp);
@@ -234,7 +306,12 @@ function declare(a: Action, st: State) {
       st.pages.add(tmp);
       break;
     case "database.create":
-      st.dbs.set(tmp, { fields: new Map(), rows: new Map() });
+      st.dbs.set(tmp, {
+        fields: new Map(
+          kids.map((k) => [k.temp_id, { type: k.type!, writable: true }]),
+        ),
+        rows: new Map(),
+      });
       break;
     case "row.add":
       db!.rows.set(tmp, {});
@@ -251,7 +328,8 @@ function validateOne(
   st: State,
 ): Action | null {
   if (
-    !isObj(raw) || !isStr(raw.type) || !allowed.has(raw.type) || !SPEC[raw.type]
+    !isObj(raw) || !isStr(raw.type) || !allowed.has(raw.type) ||
+    !Object.hasOwn(SPEC, raw.type)
   ) return null;
   const { f, any } = SPEC[raw.type];
   const out: Action = { type: raw.type };
