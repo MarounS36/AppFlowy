@@ -94,8 +94,11 @@ abstract class ActionHandler {
 
   ActionPreview describe(AssistAction a, Map<String, String> labels);
 
-  /// Throws on failure.
+  /// All-or-nothing: on failure, roll back your own writes, bind nothing, and
+  /// throw. Call [ApplyScope.bind] only after the write succeeded. Return
+  /// exactly one record, with `type == this.type`.
   Future<UndoRecord> apply(AssistAction a, ApplyScope scope);
 
+  /// Must be idempotent: a crash mid-undo can run it again on the same record.
   Future<UndoOutcome> undo(UndoRecord r);
 }

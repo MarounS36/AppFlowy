@@ -40,8 +40,14 @@ class ActionEngine {
       } catch (_) {
         continue; // malformed server JSON
       }
+      // A temp id may be declared once; a re-declaration would rebind it.
+      final temps = _declaredTemps(a).toList();
+      if (temps.toSet().length != temps.length ||
+          temps.any(s.boundTemps.contains)) {
+        continue;
+      }
       kept.add(a);
-      s.boundTemps.addAll(_declaredTemps(a));
+      s.boundTemps.addAll(temps);
     }
     return kept;
   }
@@ -56,7 +62,12 @@ class ActionEngine {
       _handlers[a.type]!.describe(a, labels);
 
   /// Resumes at `p.records.length`; stops on the first failure (status
-  /// partial). Never rethrows.
+  /// partial, error set). Never rethrows; an [onProgress] failure counts as a
+  /// failure after that action, so a retry resumes at the next one.
+  ///
+  /// The last in-flight action may run again after a crash (the window
+  /// between its write and the persist in [onProgress]). Callers must
+  /// serialize apply/undo per proposal (the service does).
   Future<void> apply(
     AppliedProposal p, {
     Future<void> Function()? onProgress,
@@ -68,14 +79,24 @@ class ActionEngine {
     final scope = ApplyScope(p.tempIds);
     for (var i = p.records.length; i < p.actions.length; i++) {
       final a = p.actions[i];
+      final before = Map.of(p.tempIds);
       try {
-        p.records.add(await _handlers[a.type]!.apply(a, scope));
+        final h =
+            _handlers[a.type] ?? (throw StateError('No handler for ${a.type}'));
+        p.records.add(await h.apply(a, scope));
+        await onProgress?.call();
       } catch (e) {
+        // Handler failed: drop anything it bound. Persist failed: the action
+        // is done, keep its bindings.
+        if (p.records.length == i) {
+          p.tempIds
+            ..clear()
+            ..addAll(before);
+        }
         p.status = AppliedStatus.partial;
         p.error = e.toString();
         return;
       }
-      await onProgress?.call();
     }
     p.status = AppliedStatus.applied;
     p.error = null;
@@ -104,14 +125,18 @@ class ActionEngine {
   }
 }
 
-/// `temp_id` plus nested ones in `columns` (board.create) and `fields`
-/// (database.create).
+/// `new:` ids in `temp_id` plus nested ones in `columns` (board.create) and
+/// `fields` (database.create).
 Iterable<String> _declaredTemps(AssistAction a) sync* {
-  if (a.fields['temp_id'] case final String t) yield t;
+  if (a.fields['temp_id'] case final String t when t.startsWith('new:')) {
+    yield t;
+  }
   for (final key in const ['columns', 'fields']) {
     if (a.fields[key] case final List list) {
       for (final e in list) {
-        if (e case {'temp_id': final String t}) yield t;
+        if (e case {'temp_id': final String t} when t.startsWith('new:')) {
+          yield t;
+        }
       }
     }
   }

@@ -1,9 +1,14 @@
+import 'dart:async';
+
 import 'package:appflowy/features/assistant/data/assistant_models.dart';
 import 'package:appflowy/features/assistant/logic/action_engine.dart';
 import 'package:appflowy/features/assistant/logic/action_handler.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 final calls = <String>[];
+
+/// The bound temp set each validate call saw.
+final boundSeen = <Set<String>>[];
 
 /// Driven by the action's fields: `ref` (id it touches), `temp_id`, `fail`,
 /// `outcome` (undo result name, or 'throw').
@@ -17,6 +22,7 @@ class Fake implements ActionHandler {
 
   @override
   String? validate(AssistAction a, ValidationScope scope) {
+    boundSeen.add({...scope.boundTemps});
     final ref = a.fields['ref'] as String?;
     if (ref == null) return null;
     final ok = ref.startsWith('new:')
@@ -33,10 +39,11 @@ class Fake implements ActionHandler {
   Future<UndoRecord> apply(AssistAction a, ApplyScope scope) async {
     final n = a.fields['n'];
     calls.add('apply $n');
-    if (a.fields['fail'] == true) throw StateError('boom $n');
     final ref = a.fields['ref'] as String?;
     final resolved = ref == null ? null : scope.resolve(ref);
+    // Binds before failing (a careless handler) to test the engine's rollback.
     if (a.tempId case final t?) scope.bind(t, 'real$n');
+    if (a.fields['fail'] == true) throw StateError('boom $n');
     return UndoRecord(
       type: type,
       data: {'n': n, 'ref': resolved, 'outcome': a.fields['outcome']},
@@ -113,7 +120,10 @@ AppliedProposal proposal(
     );
 
 void main() {
-  setUp(calls.clear);
+  setUp(() {
+    calls.clear();
+    boundSeen.clear();
+  });
 
   group('filterValid', () {
     test('filterValid drops forward temp refs', () {
@@ -187,6 +197,55 @@ void main() {
         [1, 2],
       );
       expect(bound, {'new:9'});
+    });
+
+    test('only new: ids are declared', () {
+      kept([
+        act(
+          1,
+          temp: 'c1',
+          extra: {
+            'columns': [
+              {'temp_id': 'col'},
+              {'temp_id': 'new:c'},
+            ],
+          },
+        ),
+        act(2),
+      ]);
+      expect(boundSeen.last, {'new:c'});
+    });
+
+    test('re-declaring a temp id drops the action', () {
+      expect(
+        kept(
+          [
+            act(1, temp: 'new:1'),
+            act(2, temp: 'new:1'),
+            act(
+              3,
+              extra: {
+                'columns': [
+                  {'temp_id': 'new:1'},
+                ],
+              },
+            ),
+            act(
+              4,
+              extra: {
+                'fields': [
+                  {'temp_id': 'new:2'},
+                  {'temp_id': 'new:2'},
+                ],
+              },
+            ),
+            act(5, temp: 'new:9'),
+            act(6, ref: 'new:1'),
+          ],
+          boundTemps: {'new:9'},
+        ),
+        [1, 6],
+      );
     });
   });
 
@@ -266,11 +325,53 @@ void main() {
       expect(p.status, AppliedStatus.applied);
     });
 
-    test('onProgress called after each action', () async {
+    test('onProgress is awaited after each action', () async {
       final p = proposal([act(1), act(2), act(3, fail: true)]);
       final seen = <int>[];
-      await engine.apply(p, onProgress: () async => seen.add(p.records.length));
+      final gate = Completer<void>();
+      final done = engine.apply(
+        p,
+        onProgress: () async {
+          seen.add(p.records.length);
+          if (seen.length == 1) await gate.future;
+        },
+      );
+      await Future<void>.delayed(Duration.zero);
+      expect(calls, ['apply 1']);
+      gate.complete();
+      await done;
       expect(seen, [1, 2]);
+      expect(calls, ['apply 1', 'apply 2', 'apply 3']);
+    });
+
+    test('onProgress failure goes partial; retry resumes at the next action',
+        () async {
+      final p = proposal([act(1, temp: 'new:1'), act(2, ref: 'new:1')]);
+      await engine.apply(p, onProgress: () async => throw StateError('disk'));
+      expect(p.status, AppliedStatus.partial);
+      expect(p.error, contains('disk'));
+      expect(p.records, hasLength(1));
+      expect(p.tempIds, {'new:1': 'real1'});
+      await engine.apply(p);
+      expect(calls, ['apply 1', 'apply 2']);
+      expect(p.records[1].data['ref'], 'real1');
+      expect(p.status, AppliedStatus.applied);
+    });
+
+    test('a handler that binds then throws leaves no binding', () async {
+      final p =
+          proposal([act(1, temp: 'new:1'), act(2, temp: 'new:2', fail: true)]);
+      await engine.apply(p);
+      expect(p.status, AppliedStatus.partial);
+      expect(p.tempIds, {'new:1': 'real1'});
+    });
+
+    test('a missing handler fails the action with a clear error', () async {
+      final p = proposal([act(1), act(2, type: 'nope')]);
+      await engine.apply(p);
+      expect(p.status, AppliedStatus.partial);
+      expect(p.records, hasLength(1));
+      expect(p.error, contains('No handler for nope'));
     });
   });
 
