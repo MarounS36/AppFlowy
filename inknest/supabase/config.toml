@@ -416,3 +416,6 @@ enabled = true
 
 [functions.organize]
 verify_jwt = false
+
+[functions.assist]
+verify_jwt = false
