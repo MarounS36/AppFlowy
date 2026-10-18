@@ -1,5 +1,4 @@
-import 'package:appflowy/core/config/kv.dart';
-import 'package:appflowy/core/config/kv_keys.dart';
+import 'package:appflowy/features/assistant/gateways/space.dart';
 import 'package:appflowy/plugins/database/application/cell/cell_controller.dart';
 import 'package:appflowy/plugins/database/application/field/field_info.dart';
 import 'package:appflowy/plugins/database/application/row/row_service.dart';
@@ -7,8 +6,6 @@ import 'package:appflowy/plugins/database/domain/cell_service.dart';
 import 'package:appflowy/plugins/database/domain/database_view_service.dart';
 import 'package:appflowy/plugins/database/domain/date_cell_service.dart';
 import 'package:appflowy/plugins/database/domain/field_service.dart';
-import 'package:appflowy/startup/startup.dart';
-import 'package:appflowy/workspace/application/view/view_ext.dart';
 import 'package:appflowy/workspace/application/view/view_service.dart';
 import 'package:appflowy_backend/dispatch/dispatch.dart';
 import 'package:appflowy_backend/protobuf/flowy-database2/protobuf.dart';
@@ -56,14 +53,9 @@ class CalendarGateway {
   Future<String> ensureMyWeek() async {
     final found = await findMyWeek();
     if (found != null) return found;
-    var space = await getIt<KeyValueStorage>().get(KVKeys.lastOpenedSpaceId);
-    if (space == null || space.isEmpty) {
-      final views = (await ViewBackendService.getAllViews()).getOrThrow().items;
-      space = views.firstWhere((v) => v.isSpace).id;
-    }
     final view = await ViewBackendService.createView(
       layoutType: ViewLayoutPB.Calendar,
-      parentViewId: space,
+      parentViewId: await currentSpaceId(),
       name: myWeekName,
     );
     return view.getOrThrow().id;
