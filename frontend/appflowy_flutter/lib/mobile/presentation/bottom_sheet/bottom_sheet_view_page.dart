@@ -1,3 +1,4 @@
+import 'package:appflowy/features/ai_organize/logic/organize_service.dart';
 import 'package:appflowy/features/page_access_level/logic/page_access_level_bloc.dart';
 import 'package:appflowy/generated/flowy_svgs.g.dart';
 import 'package:appflowy/generated/locale_keys.g.dart';
@@ -17,6 +18,7 @@ enum MobileViewBottomSheetBodyAction {
   undo,
   redo,
   rename,
+  aiOrganize,
   duplicate,
   delete,
   addToFavorites,
@@ -34,6 +36,7 @@ enum MobileViewBottomSheetBodyAction {
     undo,
     redo,
     rename,
+    aiOrganize,
     delete,
   ];
 }
@@ -127,6 +130,27 @@ class MobileViewBottomSheetBody extends StatelessWidget {
           ),
         ),
         _divider(),
+        if (view.layout == ViewLayoutPB.Document &&
+            (context.watch<PageAccessLevelBloc?>()?.state.isEditable ?? true))
+          FutureBuilder<bool>(
+            future: OrganizeService.isAvailable(),
+            builder: (context, snapshot) {
+              if (snapshot.data != true) return const SizedBox.shrink();
+              return Column(
+                children: [
+                  MobileQuickActionButton(
+                    text: LocaleKeys.aiOrganize_action.tr(),
+                    icon: FlowySvgs.ai_sparks_s,
+                    iconSize: const Size.square(18),
+                    onTap: () => onAction(
+                      MobileViewBottomSheetBodyAction.aiOrganize,
+                    ),
+                  ),
+                  _divider(),
+                ],
+              );
+            },
+          ),
         MobileQuickActionButton(
           text: isFavorite
               ? LocaleKeys.button_removeFromFavorites.tr()

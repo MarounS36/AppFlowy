@@ -3464,5 +3464,37 @@
   },
   "shareSection": {
     "shared": "Shared with me"
+  },
+  "aiOrganize": {
+    "action": "Organize",
+    "title": "AI Organize",
+    "working": "Organizing… this can take a minute",
+    "titleRow": "Title",
+    "folderRow": "Folder",
+    "chooseAnother": "Choose another",
+    "applySelected": "Apply selected",
+    "reject": "Reject",
+    "nothingToSuggest": "No better title or folder found",
+    "stale": "This note changed since the suggestion",
+    "rerun": "Re-run",
+    "applyAnyway": "Apply anyway",
+    "failed": "Couldn't get a suggestion",
+    "retry": "Retry",
+    "userLimit": "Daily AI Organize limit reached. Try again tomorrow.",
+    "globalLimit": "AI Organize is busy today. Try again tomorrow.",
+    "notInvited": "AI Organize is invite-only. Ask the InkNest owner for access.",
+    "signInAgain": "Sign in again to use AI Organize",
+    "noteMissing": "This note no longer exists",
+    "enabled": "AI Organize",
+    "needsReview": "Needs review",
+    "history": "History",
+    "undo": "Undo",
+    "applied": "Applied",
+    "undone": "Undone",
+    "conflict": "Changed since, not undone",
+    "empty": "Nothing here yet",
+    "consentTitle": "Send this note to AI?",
+    "consentBody": "To suggest a title and folder, InkNest sends this note's title, text, and your folder names to InkNest's server and to NaraRouter (and the AI model provider behind it). InkNest's server does not store them. NaraRouter's and the provider's own data policies apply.",
+    "consentAccept": "Continue"
   }
 }

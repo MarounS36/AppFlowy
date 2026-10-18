@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:appflowy/core/helpers/url_launcher.dart';
+import 'package:appflowy/features/ai_organize/presentation/organize_sheet.dart';
 import 'package:appflowy/features/page_access_level/logic/page_access_level_bloc.dart';
 import 'package:appflowy/generated/locale_keys.g.dart';
 import 'package:appflowy/mobile/presentation/bottom_sheet/bottom_sheet.dart';
@@ -67,6 +68,12 @@ class MobileViewPageMoreBottomSheet extends StatelessWidget {
     Map<String, dynamic>? arguments,
   ) async {
     switch (action) {
+      case MobileViewBottomSheetBodyAction.aiOrganize:
+        await showOrganizeSheet(context, noteId: view.id);
+        if (context.mounted) {
+          context.pop();
+        }
+        break;
       case MobileViewBottomSheetBodyAction.duplicate:
         _duplicate(context);
         break;
