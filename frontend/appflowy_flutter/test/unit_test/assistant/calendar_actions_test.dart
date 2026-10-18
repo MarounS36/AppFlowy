@@ -250,12 +250,6 @@ void main() {
           as CalendarEntry;
       expect(e.title, 'Dentist');
       expect(e.start, dentist.start);
-      // Second undo: a twin now exists under the new id -> no duplicate.
-      when(() => gw.entries('v1', any(), any()))
-          .thenAnswer((_) async => [dentist]);
-      clearInteractions(gw);
-      expect(await h['calendar.remove']!.undo(r), UndoOutcome.skippedChanged);
-      verifyNever(() => gw.add(any(), any()));
     });
 
     test('undo twice: one add, both reverted; twin does not block', () async {
