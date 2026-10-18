@@ -1,5 +1,18 @@
 import { createClient } from "jsr:@supabase/supabase-js@2";
-import type { Deps } from "./handler.ts";
+import type { Deps, Usage } from "./handler.ts";
+
+export function parseLimit(raw: string | undefined, dflt: number): number {
+  if (raw === undefined) return dflt;
+  if (!/^\d+$/.test(raw.trim())) throw new Error(`bad limit "${raw}"`);
+  return Number(raw);
+}
+
+export function toUsage(data: unknown): Usage {
+  if (data === "ok" || data === "user_limit" || data === "global_limit") {
+    return data;
+  }
+  throw new Error("bad consume result");
+}
 
 export function realDeps(
   env: (key: string) => string | undefined,
@@ -37,11 +50,11 @@ export function realDeps(
     async consume(userUuid) {
       const { data, error } = await db().rpc("organize_consume", {
         p_user: userUuid,
-        p_user_limit: Number(env("DAILY_LIMIT") ?? 50),
-        p_global_limit: Number(env("GLOBAL_DAILY_LIMIT") ?? 500),
+        p_user_limit: parseLimit(env("DAILY_LIMIT"), 50),
+        p_global_limit: parseLimit(env("GLOBAL_DAILY_LIMIT"), 500),
       });
       if (error) throw error;
-      return data;
+      return toUsage(data);
     },
     async complete(messages) {
       const res = await fetchFn(`${need("NARA_BASE_URL")}/chat/completions`, {

@@ -1,5 +1,5 @@
-import { assertEquals, assertRejects } from "jsr:@std/assert@1";
-import { realDeps } from "./deps.ts";
+import { assertEquals, assertRejects, assertThrows } from "jsr:@std/assert@1";
+import { parseLimit, realDeps, toUsage } from "./deps.ts";
 
 const ENV: Record<string, string> = {
   AF_CLOUD_URL: "https://af.test",
@@ -65,7 +65,20 @@ Deno.test("complete posts OpenAI-compatible request", async () => {
 });
 
 Deno.test("complete throws on non-200", async () => {
-  await assertRejects(() =>
-    realDeps(env, stub(500, {}).fetchFn).complete([])
-  );
+  await assertRejects(() => realDeps(env, stub(500, {}).fetchFn).complete([]));
+});
+
+Deno.test("parseLimit defaults and rejects bad values", () => {
+  assertEquals(parseLimit(undefined, 50), 50);
+  assertEquals(parseLimit("7", 50), 7);
+  assertEquals(parseLimit("0", 50), 0);
+  for (const bad of ["fifty", "", "-1", "1.5"]) {
+    assertThrows(() => parseLimit(bad, 50));
+  }
+});
+
+Deno.test("toUsage accepts only known values", () => {
+  assertEquals(toUsage("user_limit"), "user_limit");
+  assertThrows(() => toUsage(null));
+  assertThrows(() => toUsage("nope"));
 });
