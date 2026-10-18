@@ -23,6 +23,7 @@ class CalendarEntry {
     required this.start,
     required this.end,
     required this.allDay,
+    this.isRange = false,
   });
 
   final String id;
@@ -30,6 +31,9 @@ class CalendarEntry {
   final DateTime start;
   final DateTime end;
   final bool allDay;
+
+  /// The date cell's own range flag (a multi-day all-day entry has it).
+  final bool isRange;
 }
 
 const myWeekName = 'My Week';
@@ -95,6 +99,7 @@ class CalendarGateway {
       start: start,
       end: end,
       allDay: !d.includeTime,
+      isRange: d.isRange,
     );
   }
 
@@ -142,7 +147,7 @@ class CalendarGateway {
     ).update(
       date: e.start,
       endDate: e.end,
-      isRange: !e.allDay,
+      isRange: e.isRange,
       includeTime: !e.allDay,
     ))
         .getOrThrow();
@@ -165,16 +170,36 @@ class CalendarGateway {
     return row.id;
   }
 
+  /// Writes only what changed; if the date write fails after the title was
+  /// written, the title is put back before rethrowing.
   Future<void> update(String viewId, String rowId, CalendarEntry e) async {
+    final old = await entry(viewId, rowId) ?? (throw StateError('Gone'));
     final primary = (await FieldBackendService.getPrimaryField(viewId: viewId))
         .getOrThrow();
-    (await CellBackendService.updateCell(
-      viewId: viewId,
-      cellContext: CellContext(fieldId: primary.id, rowId: rowId),
-      data: e.title,
-    ))
-        .getOrThrow();
-    await _setDate(viewId, rowId, e);
+    Future<void> setTitle(String t) async =>
+        (await CellBackendService.updateCell(
+          viewId: viewId,
+          cellContext: CellContext(fieldId: primary.id, rowId: rowId),
+          data: t,
+        ))
+            .getOrThrow();
+    final titleChanged = old.title != e.title;
+    final dateChanged = old.start != e.start ||
+        old.end != e.end ||
+        old.allDay != e.allDay ||
+        old.isRange != e.isRange;
+    if (titleChanged) await setTitle(e.title);
+    if (!dateChanged) return;
+    try {
+      await _setDate(viewId, rowId, e);
+    } catch (_) {
+      if (titleChanged) {
+        try {
+          await setTitle(old.title);
+        } catch (_) {}
+      }
+      rethrow;
+    }
   }
 
   Future<void> remove(String viewId, String rowId) async =>

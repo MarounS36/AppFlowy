@@ -16,8 +16,16 @@ CalendarEntry entry(
   DateTime s,
   DateTime e, {
   bool allDay = false,
+  bool? isRange,
 }) =>
-    CalendarEntry(id: id, title: title, start: s, end: e, allDay: allDay);
+    CalendarEntry(
+      id: id,
+      title: title,
+      start: s,
+      end: e,
+      allDay: allDay,
+      isRange: isRange ?? !allDay,
+    );
 
 final dentist = entry(
   'r1',
@@ -136,6 +144,40 @@ void main() {
     expect(a.editable, ['title', 'date', 'start', 'end']);
   });
 
+  test('title-only update keeps a multi-day all-day span', () async {
+    final trip = entry(
+      'r5',
+      'Trip',
+      DateTime(2026, 10, 21),
+      DateTime(2026, 10, 23),
+      allDay: true,
+      isRange: true,
+    );
+    when(() => gw.findMyWeek()).thenAnswer((_) async => 'v1');
+    when(() => gw.entry('v1', 'r5')).thenAnswer((_) async => trip);
+    when(() => gw.update('v1', 'r5', any())).thenAnswer((_) async {});
+    await h['calendar.update']!.apply(
+      act('calendar.update', {'entry_id': 'r5', 'title': 'Holiday'}),
+      ApplyScope({}),
+    );
+    final e = verify(() => gw.update('v1', 'r5', captureAny())).captured.single
+        as CalendarEntry;
+    expect(e.title, 'Holiday');
+    expect(e.start, trip.start);
+    expect(e.end, trip.end);
+    expect(e.isRange, true);
+    expect(e.allDay, true);
+  });
+
+  test('validate: all_day must be bool, titles trimmed, no CR', () {
+    String? v(Map<String, dynamic> f) =>
+        h['calendar.update']!.validate(act('calendar.update', f), scope);
+    expect(v({'entry_id': 'r1', 'all_day': 'yes'}), isNotNull);
+    expect(v({'entry_id': 'r1', 'title': 'a\rb'}), isNotNull);
+    expect(v({'entry_id': 'r1', 'title': '  ${'x' * 120}  '}), isNull);
+    expect(v({'entry_id': 'r1', 'title': '   '}), isNotNull);
+  });
+
   group('update', () {
     final moved = entry(
       'r1',
@@ -216,6 +258,48 @@ void main() {
       verifyNever(() => gw.add(any(), any()));
     });
 
+    test('undo twice: one add, both reverted; twin does not block', () async {
+      when(() => gw.findMyWeek()).thenAnswer((_) async => 'v1');
+      when(() => gw.entry('v1', 'r1')).thenAnswer((_) async => dentist);
+      when(() => gw.remove('v1', 'r1')).thenAnswer((_) async {});
+      final r = await h['calendar.remove']!
+          .apply(act('calendar.remove', {'entry_id': 'r1'}), ApplyScope({}));
+      when(() => gw.entry('v1', 'r1')).thenAnswer((_) async => null);
+      when(() => gw.add('v1', any())).thenAnswer((_) async => 'r2');
+      // An identical entry already exists under another id: still restores.
+      when(() => gw.entries('v1', any(), any()))
+          .thenAnswer((_) async => [dentist]);
+      expect(await h['calendar.remove']!.undo(r), UndoOutcome.reverted);
+      expect(r.data['restored_id'], 'r2');
+      expect(await h['calendar.remove']!.undo(r), UndoOutcome.reverted);
+      verify(() => gw.add('v1', any())).called(1);
+    });
+
+    test('multi-day all-day entry is re-added with same span', () async {
+      final trip = entry(
+        'r5',
+        'Trip',
+        DateTime(2026, 10, 21),
+        DateTime(2026, 10, 23),
+        allDay: true,
+        isRange: true,
+      );
+      when(() => gw.findMyWeek()).thenAnswer((_) async => 'v1');
+      when(() => gw.entry('v1', 'r5')).thenAnswer((_) async => trip);
+      when(() => gw.remove('v1', 'r5')).thenAnswer((_) async {});
+      final r = await h['calendar.remove']!
+          .apply(act('calendar.remove', {'entry_id': 'r5'}), ApplyScope({}));
+      when(() => gw.entry('v1', 'r5')).thenAnswer((_) async => null);
+      when(() => gw.add('v1', any())).thenAnswer((_) async => 'r6');
+      await h['calendar.remove']!.undo(r);
+      final e = verify(() => gw.add('v1', captureAny())).captured.single
+          as CalendarEntry;
+      expect(e.start, trip.start);
+      expect(e.end, trip.end);
+      expect(e.isRange, true);
+      expect(e.allDay, true);
+    });
+
     test('apply throws when entry gone', () async {
       when(() => gw.findMyWeek()).thenAnswer((_) async => 'v1');
       when(() => gw.entry('v1', 'r1')).thenAnswer((_) async => null);
@@ -293,6 +377,7 @@ void main() {
         'start': '16:00',
         'end': '17:00',
         'all_day': false,
+        'is_range': true,
       });
       expect((c.json['entries'] as List).last['start'], isNull);
     });

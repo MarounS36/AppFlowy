@@ -42,6 +42,7 @@ bool _same(CalendarEntry? e, Map<String, dynamic> m) =>
     e != null &&
     e.title == m['title'] &&
     e.allDay == m['all_day'] &&
+    e.isRange == (m['is_range'] as bool? ?? !e.allDay) &&
     _minute(e.start) == m['start'] &&
     _minute(e.end) == m['end'];
 
@@ -53,6 +54,7 @@ Map<String, dynamic> _snap(CalendarEntry e) => {
       'start': _minute(e.start),
       'end': _minute(e.end),
       'all_day': e.allDay,
+      'is_range': e.isRange,
     };
 
 CalendarEntry _fromSnap(String id, Map<String, dynamic> m) => CalendarEntry(
@@ -61,6 +63,7 @@ CalendarEntry _fromSnap(String id, Map<String, dynamic> m) => CalendarEntry(
       start: DateTime.parse(m['start'] as String),
       end: DateTime.parse(m['end'] as String),
       allDay: m['all_day'] as bool,
+      isRange: m['is_range'] as bool? ?? !(m['all_day'] as bool),
     );
 
 List<ActionHandler> calendarHandlers(CalendarGateway gw) =>
@@ -78,8 +81,11 @@ abstract class _Base implements ActionHandler {
     if (f.containsKey('title')) {
       final t = f['title'];
       if (t is! String || t.trim().isEmpty) return 'Title is empty';
-      if (t.length > 120 || t.contains('\n')) return 'Title is too long';
+      if (t.trim().length > 120 || t.contains(RegExp(r'[\r\n]'))) {
+        return 'Title is too long';
+      }
     }
+    if (f['all_day'] != null && f['all_day'] is! bool) return 'Bad all_day';
     if (f['date'] != null) {
       final d = _date(f['date']);
       final w = DateTime(
@@ -152,10 +158,11 @@ class _Add extends _Base {
     final allDay = f['all_day'] == true;
     final e = CalendarEntry(
       id: '',
-      title: f['title'] as String,
+      title: (f['title'] as String).trim(),
       start: allDay ? day : _at(day, f['start'] as String),
       end: allDay ? day : _at(day, f['end'] as String),
       allDay: allDay,
+      isRange: !allDay,
     );
     final viewId = await gw.ensureMyWeek();
     final id = await gw.add(viewId, e);
@@ -223,21 +230,37 @@ class _Update extends _Base {
     final id = f['entry_id'] as String;
     final cur =
         await gw.entry(viewId, id) ?? (throw StateError('Entry not found'));
-    final day = _date(f['date']) ??
-        DateTime(cur.start.year, cur.start.month, cur.start.day);
     final allDay = (f['all_day'] as bool?) ?? cur.allDay;
-    final s = (f['start'] as String?) ?? (cur.allDay ? null : _hm(cur.start));
-    final e = (f['end'] as String?) ?? (cur.allDay ? null : _hm(cur.end));
-    if (!allDay && (s == null || e == null || s.compareTo(e) >= 0)) {
-      throw StateError('Start must be before end');
+    final curDay = DateTime(cur.start.year, cur.start.month, cur.start.day);
+    final day = _date(f['date']) ?? curDay;
+    final CalendarEntry next;
+    if (allDay && cur.allDay) {
+      // Keep a multi-day span: shift it, don't collapse it.
+      final endDay = DateTime(cur.end.year, cur.end.month, cur.end.day);
+      final span = endDay.difference(curDay).inDays;
+      next = CalendarEntry(
+        id: id,
+        title: ((f['title'] as String?) ?? cur.title).trim(),
+        start: day,
+        end: DateTime(day.year, day.month, day.day + span),
+        allDay: true,
+        isRange: cur.isRange,
+      );
+    } else {
+      final s = (f['start'] as String?) ?? (cur.allDay ? null : _hm(cur.start));
+      final e = (f['end'] as String?) ?? (cur.allDay ? null : _hm(cur.end));
+      if (!allDay && (s == null || e == null || s.compareTo(e) >= 0)) {
+        throw StateError('Start must be before end');
+      }
+      next = CalendarEntry(
+        id: id,
+        title: ((f['title'] as String?) ?? cur.title).trim(),
+        start: allDay ? day : _at(day, s!),
+        end: allDay ? day : _at(day, e!),
+        allDay: allDay,
+        isRange: !allDay,
+      );
     }
-    final next = CalendarEntry(
-      id: id,
-      title: (f['title'] as String?) ?? cur.title,
-      start: allDay ? day : _at(day, s!),
-      end: allDay ? day : _at(day, e!),
-      allDay: allDay,
-    );
     await gw.update(viewId, id, next);
     return UndoRecord(
       type: type,
@@ -268,6 +291,8 @@ class _Update extends _Base {
   }
 }
 
+/// Known limit: undoing a remove re-adds the entry under a NEW id, so other
+/// records in the same batch that hold the old entry id will see skippedGone.
 class _Remove extends _Base {
   _Remove(super.gw);
 
@@ -301,18 +326,13 @@ class _Remove extends _Base {
   Future<UndoOutcome> undo(UndoRecord r) async {
     final viewId = r.data['view_id'] as String;
     final id = r.data['entry_id'] as String;
-    final before = Map<String, dynamic>.from(r.data['before'] as Map);
-    // Still there, or already re-added under a new id (a repeated undo):
-    // nothing to restore.
+    // Idempotent: a repeated undo must not re-add a second copy.
+    if (r.data['restored_id'] != null) return UndoOutcome.reverted;
     if (await gw.entry(viewId, id) != null) return UndoOutcome.skippedChanged;
-    final start = DateTime.parse(before['start'] as String);
-    final twin = await gw.entries(
-      viewId,
-      start,
-      start.add(const Duration(minutes: 1)),
-    );
-    if (twin.any((e) => _same(e, before))) return UndoOutcome.skippedChanged;
-    await gw.add(viewId, _fromSnap(id, before));
+    final before = Map<String, dynamic>.from(r.data['before'] as Map);
+    final newId = await gw.add(viewId, _fromSnap(id, before));
+    // The service persists the record after undo, so this survives a re-run.
+    r.data['restored_id'] = newId;
     return UndoOutcome.reverted;
   }
 }
@@ -342,6 +362,7 @@ Future<ContextPart> calendarContext(
             'start': e.allDay ? null : _hm(e.start),
             'end': e.allDay ? null : _hm(e.end),
             'all_day': e.allDay,
+            'is_range': e.isRange,
           },
       ],
     },
