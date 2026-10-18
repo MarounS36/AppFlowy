@@ -1,3 +1,5 @@
+import type { ChatMessage } from "../_shared/pipeline.ts";
+export { type ChatMessage, parseModelOutput } from "../_shared/pipeline.ts";
 export const MAX_BODY_BYTES = 131072;
 export const MAX_TITLE = 120;
 
@@ -12,7 +14,6 @@ export type Suggestion = {
   folder_id: string | null;
   reason: string;
 };
-export type ChatMessage = { role: "system" | "user"; content: string };
 
 const isStr = (v: unknown): v is string => typeof v === "string";
 const isStrArr = (v: unknown): v is string[] =>
@@ -75,17 +76,6 @@ export function buildMessages(req: OrganizeRequest): ChatMessage[] {
         }),
     },
   ];
-}
-
-export function parseModelOutput(text: string): unknown | null {
-  const a = text.indexOf("{");
-  const b = text.lastIndexOf("}");
-  if (a < 0 || b < a) return null;
-  try {
-    return JSON.parse(text.slice(a, b + 1));
-  } catch {
-    return null;
-  }
 }
 
 export function validateSuggestion(

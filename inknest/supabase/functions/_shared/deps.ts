@@ -1,5 +1,5 @@
 import { createClient } from "jsr:@supabase/supabase-js@2";
-import type { Deps, Usage } from "./handler.ts";
+import type { Deps, Usage } from "./pipeline.ts";
 
 export function parseLimit(raw: string | undefined, dflt: number): number {
   if (raw === undefined) return dflt;
