@@ -1,7 +1,7 @@
 # InkNest Plan My Week — v1 Design
 
 Date: 2026-10-18
-Status: Draft, awaiting approval
+Status: Superseded by 2026-10-18-inknest-assistant-design.md
 Builds on: `2026-10-18-inknest-ai-organize-design.md` (same server, key, limits, and approve-first pattern)
 
 ## Intent
