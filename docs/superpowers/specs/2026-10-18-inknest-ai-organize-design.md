@@ -1,7 +1,7 @@
 # InkNest AI Organize — v1 Design
 
 Date: 2026-10-18
-Status: Draft, awaiting approval
+Status: Approved by owner, 2026-10-18
 Source requirements: "InkNest — AI Auto-Organization Requirements" (AO-01 … AO-19)
 
 ## Intent
