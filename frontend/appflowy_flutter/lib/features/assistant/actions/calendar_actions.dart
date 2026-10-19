@@ -5,22 +5,31 @@ import 'package:appflowy/features/assistant/logic/action_handler.dart';
 const _days = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
 final _timeRe = RegExp(r'^([01]\d|2[0-3]):([0-5]\d)$');
 final _dateRe = RegExp(r'^(\d{4})-(\d{2})-(\d{2})$');
-final _labelRe =
-    RegExp(r'^(.*) · (\w{3}) (?:(\d\d:\d\d)–(\d\d:\d\d)|\(all day\))$');
+final _labelRe = RegExp(
+  r'^(.*) · (\w{3}) (?:(\d\d:\d\d)(?:–(\d\d:\d\d))?|\(all day\))$',
+);
 
 String _two(int n) => n.toString().padLeft(2, '0');
 String _hm(DateTime d) => '${_two(d.hour)}:${_two(d.minute)}';
 String _ymd(DateTime d) => '${d.year}-${_two(d.month)}-${_two(d.day)}';
 
+/// No [e]: a single point in time.
 String _slot(String title, String day, bool allDay, String? s, String? e) =>
-    allDay ? '$title · $day (all day)' : '$title · $day $s–$e';
+    allDay
+        ? '$title · $day (all day)'
+        : e == null
+            ? '$title · $day $s'
+            : '$title · $day $s–$e';
+
+/// The end time, null for all-day entries and single points.
+String? _endHm(CalendarEntry e) => e.allDay || !e.isRange ? null : _hm(e.end);
 
 String _label(CalendarEntry e) => _slot(
       e.title,
       _days[e.start.weekday - 1],
       e.allDay,
       _hm(e.start),
-      _hm(e.end),
+      _endHm(e),
     );
 
 DateTime? _date(Object? v) {
@@ -76,8 +85,9 @@ abstract class _Base implements ActionHandler {
   @override
   AssistStage get stage => AssistStage.schedule;
 
-  /// Checks the optional fields shared by add and update.
-  String? checkFields(Map<String, dynamic> f, ValidationScope scope) {
+  /// Checks the optional fields shared by add and update; the week only
+  /// when [weekStart] is given (apply re-checks the user's edits without it).
+  String? checkFields(Map<String, dynamic> f, [DateTime? weekStart]) {
     if (f.containsKey('title')) {
       final t = f['title'];
       if (t is! String || t.trim().isEmpty) return 'Title is empty';
@@ -88,14 +98,12 @@ abstract class _Base implements ActionHandler {
     if (f['all_day'] != null && f['all_day'] is! bool) return 'Bad all_day';
     if (f['date'] != null) {
       final d = _date(f['date']);
-      final w = DateTime(
-        scope.weekStart.year,
-        scope.weekStart.month,
-        scope.weekStart.day,
-      );
       if (d == null) return 'Bad date';
-      if (d.isBefore(w) || d.isAfter(DateTime(w.year, w.month, w.day + 6))) {
-        return 'Date is outside this week';
+      if (weekStart != null) {
+        final w = DateTime(weekStart.year, weekStart.month, weekStart.day);
+        if (d.isBefore(w) || d.isAfter(DateTime(w.year, w.month, w.day + 6))) {
+          return 'Date is outside this week';
+        }
       }
     }
     for (final k in ['start', 'end']) {
@@ -114,13 +122,21 @@ abstract class _Base implements ActionHandler {
     return null;
   }
 
-  String? checkId(AssistAction a, ValidationScope scope) =>
-      scope.knownIds.contains(a.fields['entry_id'])
-          ? null
-          : 'Unknown calendar entry';
+  String? checkId(AssistAction a, ValidationScope scope) {
+    final id = a.fields['entry_id'];
+    if (!scope.knownIds.contains(id)) return 'Unknown calendar entry';
+    return scope.readOnlyIds.contains(id) ? 'My Week is locked' : null;
+  }
 
   Future<String> view() async =>
       await gw.findMyWeek() ?? (throw StateError('My Week not found'));
+
+  /// [viewId], or throws when My Week is locked (a lock may be set after the
+  /// proposal). Call before any write.
+  Future<String> writable(String viewId) async {
+    if (await gw.isLocked(viewId)) throw StateError('My Week is locked');
+    return viewId;
+  }
 }
 
 class _Add extends _Base {
@@ -129,16 +145,17 @@ class _Add extends _Base {
   @override
   String get type => 'calendar.add';
 
-  @override
-  String? validate(AssistAction a, ValidationScope scope) {
-    final f = a.fields;
+  /// No end: a single point in time.
+  String? _check(Map<String, dynamic> f, [DateTime? weekStart]) {
     if (f['title'] == null) return 'Title is empty';
     if (f['date'] == null) return 'Bad date';
-    if (f['all_day'] != true && (f['start'] == null || f['end'] == null)) {
-      return 'Times are required';
-    }
-    return checkFields(f, scope);
+    if (f['all_day'] != true && f['start'] == null) return 'Start is required';
+    return checkFields(f, weekStart);
   }
+
+  @override
+  String? validate(AssistAction a, ValidationScope scope) =>
+      _check(a.fields, scope.weekStart);
 
   @override
   ActionPreview describe(AssistAction a, Map<String, String> labels) {
@@ -154,17 +171,19 @@ class _Add extends _Base {
   @override
   Future<UndoRecord> apply(AssistAction a, ApplyScope scope) async {
     final f = a.fields;
+    mustBeValid(_check(f));
     final day = _date(f['date'])!;
     final allDay = f['all_day'] == true;
+    final end = allDay ? null : f['end'] as String?;
     final e = CalendarEntry(
       id: '',
       title: (f['title'] as String).trim(),
       start: allDay ? day : _at(day, f['start'] as String),
-      end: allDay ? day : _at(day, f['end'] as String),
+      end: allDay ? day : _at(day, end ?? f['start'] as String),
       allDay: allDay,
-      isRange: !allDay,
+      isRange: end != null,
     );
-    final viewId = await gw.ensureMyWeek();
+    final viewId = await writable(await gw.ensureMyWeek());
     final id = await gw.add(viewId, e);
     return UndoRecord(
       type: type,
@@ -178,7 +197,8 @@ class _Add extends _Base {
     final id = r.data['entry_id'] as String;
     final cur = await gw.entry(viewId, id);
     if (cur == null) return UndoOutcome.skippedGone;
-    if (!_same(cur, Map<String, dynamic>.from(r.data['after'] as Map))) {
+    if (!_same(cur, Map<String, dynamic>.from(r.data['after'] as Map)) ||
+        await gw.isLocked(viewId)) {
       return UndoOutcome.skippedChanged;
     }
     await gw.remove(viewId, id);
@@ -192,11 +212,12 @@ class _Update extends _Base {
   @override
   String get type => 'calendar.update';
 
-  static const _keys = ['title', 'date', 'start', 'end', 'all_day'];
+  /// Editable in the preview (all_day is a bool, not text).
+  static const _keys = ['title', 'date', 'start', 'end'];
 
   @override
   String? validate(AssistAction a, ValidationScope scope) =>
-      checkId(a, scope) ?? checkFields(a.fields, scope);
+      checkId(a, scope) ?? checkFields(a.fields, scope.weekStart);
 
   @override
   ActionPreview describe(AssistAction a, Map<String, String> labels) {
@@ -226,39 +247,43 @@ class _Update extends _Base {
   @override
   Future<UndoRecord> apply(AssistAction a, ApplyScope scope) async {
     final f = a.fields;
-    final viewId = await view();
+    mustBeValid(checkFields(f));
+    final viewId = await writable(await view());
     final id = f['entry_id'] as String;
     final cur =
         await gw.entry(viewId, id) ?? (throw StateError('Entry not found'));
+    final title = ((f['title'] as String?) ?? cur.title).trim();
     final allDay = (f['all_day'] as bool?) ?? cur.allDay;
     final curDay = DateTime(cur.start.year, cur.start.month, cur.start.day);
     final day = _date(f['date']) ?? curDay;
     final CalendarEntry next;
-    if (allDay && cur.allDay) {
+    if (allDay) {
       // Keep a multi-day span: shift it, don't collapse it.
       final endDay = DateTime(cur.end.year, cur.end.month, cur.end.day);
-      final span = endDay.difference(curDay).inDays;
+      final span = cur.allDay ? endDay.difference(curDay).inDays : 0;
       next = CalendarEntry(
         id: id,
-        title: ((f['title'] as String?) ?? cur.title).trim(),
+        title: title,
         start: day,
         end: DateTime(day.year, day.month, day.day + span),
         allDay: true,
-        isRange: cur.isRange,
+        isRange: cur.allDay && cur.isRange,
       );
     } else {
       final s = (f['start'] as String?) ?? (cur.allDay ? null : _hm(cur.start));
-      final e = (f['end'] as String?) ?? (cur.allDay ? null : _hm(cur.end));
-      if (!allDay && (s == null || e == null || s.compareTo(e) >= 0)) {
+      // No end given: a range keeps its end, a single point stays one.
+      final e = (f['end'] as String?) ?? _endHm(cur);
+      if (s == null) throw StateError('Start is required');
+      if (e != null && s.compareTo(e) >= 0) {
         throw StateError('Start must be before end');
       }
       next = CalendarEntry(
         id: id,
-        title: ((f['title'] as String?) ?? cur.title).trim(),
-        start: allDay ? day : _at(day, s!),
-        end: allDay ? day : _at(day, e!),
-        allDay: allDay,
-        isRange: !allDay,
+        title: title,
+        start: _at(day, s),
+        end: _at(day, e ?? s),
+        allDay: false,
+        isRange: e != null,
       );
     }
     await gw.update(viewId, id, next);
@@ -279,7 +304,8 @@ class _Update extends _Base {
     final id = r.data['entry_id'] as String;
     final cur = await gw.entry(viewId, id);
     if (cur == null) return UndoOutcome.skippedGone;
-    if (!_same(cur, Map<String, dynamic>.from(r.data['after'] as Map))) {
+    if (!_same(cur, Map<String, dynamic>.from(r.data['after'] as Map)) ||
+        await gw.isLocked(viewId)) {
       return UndoOutcome.skippedChanged;
     }
     await gw.update(
@@ -311,7 +337,7 @@ class _Remove extends _Base {
 
   @override
   Future<UndoRecord> apply(AssistAction a, ApplyScope scope) async {
-    final viewId = await view();
+    final viewId = await writable(await view());
     final id = a.fields['entry_id'] as String;
     final cur =
         await gw.entry(viewId, id) ?? (throw StateError('Entry not found'));
@@ -328,7 +354,9 @@ class _Remove extends _Base {
     final id = r.data['entry_id'] as String;
     // Idempotent: a repeated undo must not re-add a second copy.
     if (r.data['restored_id'] != null) return UndoOutcome.reverted;
-    if (await gw.entry(viewId, id) != null) return UndoOutcome.skippedChanged;
+    if (await gw.entry(viewId, id) != null || await gw.isLocked(viewId)) {
+      return UndoOutcome.skippedChanged;
+    }
     final before = Map<String, dynamic>.from(r.data['before'] as Map);
     final newId = await gw.add(viewId, _fromSnap(id, before));
     // The service persists the record after undo, so this survives a re-run.
@@ -338,11 +366,13 @@ class _Remove extends _Base {
 }
 
 /// This week + last week of "My Week" for the AI. Never creates the view.
+/// Every entry is read-only while My Week is locked.
 Future<ContextPart> calendarContext(
   CalendarGateway gw,
   DateTime weekStart,
 ) async {
   final viewId = await gw.findMyWeek();
+  final locked = viewId != null && await gw.isLocked(viewId);
   final list = viewId == null
       ? <CalendarEntry>[]
       : await gw.entries(
@@ -360,7 +390,7 @@ Future<ContextPart> calendarContext(
             'title': e.title,
             'date': _ymd(e.start),
             'start': e.allDay ? null : _hm(e.start),
-            'end': e.allDay ? null : _hm(e.end),
+            'end': _endHm(e),
             'all_day': e.allDay,
             'is_range': e.isRange,
           },
@@ -368,5 +398,9 @@ Future<ContextPart> calendarContext(
     },
     labels: {for (final e in list) e.id: _label(e)},
     ids: {for (final e in list) e.id},
+    readOnlyIds: {
+      if (locked)
+        for (final e in list) e.id,
+    },
   );
 }

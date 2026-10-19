@@ -292,12 +292,13 @@ class _Create extends _Base {
     return UndoRecord(type: type, data: {'database_id': r.id});
   }
 
+  /// A database the user has added rows to since is kept.
   @override
   Future<UndoOutcome> undo(UndoRecord r) async {
     final id = r.data['database_id'] as String;
-    final d = (await gw.databases()).where((d) => d.id == id).firstOrNull;
-    if (d == null) return UndoOutcome.skippedGone;
-    if (d.isLocked) return UndoOutcome.skippedChanged;
+    final (d, skip) = await undoDb(id, 1);
+    if (skip != null) return skip;
+    if (d!.rows.isNotEmpty) return UndoOutcome.skippedChanged;
     await gw.deleteDatabase(id);
     return UndoOutcome.reverted;
   }

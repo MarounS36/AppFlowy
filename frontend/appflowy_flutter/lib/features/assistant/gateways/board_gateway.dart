@@ -50,28 +50,28 @@ class BoardSnapshot {
   final List<BoardColumn> columns;
   final List<BoardCard> cards;
 
-  /// False when the board isn't grouped by a single-select field.
+  /// False when the board is locked or isn't grouped by a single-select
+  /// field.
   final bool editable;
 }
 
 /// Thin wrapper over the existing folder/database services; not unit-tested.
 /// Every failed backend call throws its `FlowyError`.
 class BoardGateway {
-  Future<List<({String id, String name})>> boards() async {
+  Future<List<({String id, String name, bool isLocked})>> boards() async {
     final views = (await ViewBackendService.getAllViews()).getOrThrow().items;
     return [
       for (final v in views)
-        if (v.layout == ViewLayoutPB.Board) (id: v.id, name: v.name),
+        if (v.layout == ViewLayoutPB.Board)
+          (id: v.id, name: v.name, isLocked: v.isLocked),
     ];
   }
 
   /// Null when the board no longer exists.
   Future<BoardSnapshot?> board(String boardId, {int cardCap = 200}) async {
-    final name = (await boards())
-        .where((b) => b.id == boardId)
-        .map((b) => b.name)
-        .firstOrNull;
-    if (name == null) return null;
+    final b = (await boards()).where((b) => b.id == boardId).firstOrNull;
+    if (b == null) return null;
+    final name = b.name;
     final groups = await _groups(boardId);
     if (groups.isEmpty) {
       return BoardSnapshot(
@@ -83,9 +83,10 @@ class BoardGateway {
       );
     }
     final field = await _groupField(boardId, groups.first.fieldId);
-    final editable = field.fieldType == FieldType.SingleSelect;
+    final select = field.fieldType == FieldType.SingleSelect;
+    final editable = select && !b.isLocked;
     final options = {
-      if (editable)
+      if (select)
         for (final o
             in SingleSelectTypeOptionPB.fromBuffer(field.typeOptionData)
                 .options)

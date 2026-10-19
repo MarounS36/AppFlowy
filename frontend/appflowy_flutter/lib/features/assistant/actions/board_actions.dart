@@ -20,7 +20,11 @@ String? _text(Object? t, String what) {
   return null;
 }
 
-String _trim(Object? v) => (v as String).trim();
+/// Trimmed, or throws (see [mustBeValid]).
+String _must(Object? v, String what) {
+  mustBeValid(_text(v, what));
+  return (v as String).trim();
+}
 
 abstract class _Base implements ActionHandler {
   _Base(this.gw);
@@ -29,14 +33,23 @@ abstract class _Base implements ActionHandler {
   @override
   AssistStage get stage => AssistStage.schedule;
 
-  /// Each key in [keys] must be a known (or earlier-created) id; the board
-  /// must be editable.
+  /// Each key in [keys] must be a known (or earlier-created) id, a known
+  /// column or card one of the given board's (a created one is checked on
+  /// apply); the board must be editable.
   String? checkIds(AssistAction a, ValidationScope scope, List<String> keys) {
     final f = a.fields;
+    final on = scope.items['${f['board_id']}#board'];
     for (final k in keys) {
       final v = f[k];
-      if (v is! String ||
-          !(scope.knownIds.contains(v) || scope.boundTemps.contains(v))) {
+      if (v is! String) return 'Unknown $k';
+      if (scope.boundTemps.contains(v)) continue;
+      final owned = switch (k) {
+        'column_id' => on?['column_ids'] as List?,
+        'card_id' => on?['card_ids'] as List?,
+        _ => null,
+      };
+      if (!scope.knownIds.contains(v) ||
+          k != 'board_id' && !(owned?.contains(v) ?? false)) {
         return 'Unknown $k';
       }
     }
@@ -49,7 +62,13 @@ abstract class _Base implements ActionHandler {
   String label(Map<String, String> labels, Object? id, [String? fallback]) =>
       labels[id] ?? fallback ?? '';
 
-  Future<BoardSnapshot?> snapshot(String id) => gw.board(id);
+  /// For undo: null when the board is gone; throws when it can't be edited
+  /// (locked, or regrouped), which the engine reports as changed.
+  Future<BoardSnapshot?> snapshot(String id) async {
+    final s = await gw.board(id);
+    if (s != null && !s.editable) throw StateError("Board can't be edited");
+    return s;
+  }
 
   /// The board, or throws if it is gone or not a single-select board. Call
   /// before any write.
@@ -93,7 +112,7 @@ class _Create extends _Base {
     for (final c in cols) {
       final e = _text(c['name'], 'Column name');
       if (e != null) return e;
-      if (!seen.add(_trim(c['name']).toLowerCase())) {
+      if (!seen.add((c['name'] as String).trim().toLowerCase())) {
         return 'Duplicate column name';
       }
     }
@@ -112,8 +131,8 @@ class _Create extends _Base {
   Future<UndoRecord> apply(AssistAction a, ApplyScope scope) async {
     final cols = _cols(a);
     final r = await gw.createBoard(
-      _trim(a.fields['name']),
-      [for (final c in cols) _trim(c['name'])],
+      _must(a.fields['name'], 'Name'),
+      [for (final c in cols) _must(c['name'], 'Column name')],
     );
     final temp = a.tempId;
     if (temp != null) scope.bind(temp, r.boardId);
@@ -127,10 +146,13 @@ class _Create extends _Base {
     );
   }
 
+  /// A board the user has put cards on since is kept.
   @override
   Future<UndoOutcome> undo(UndoRecord r) async {
     final id = r.data['board_id'] as String;
-    if (await snapshot(id) == null) return UndoOutcome.skippedGone;
+    final s = await snapshot(id);
+    if (s == null) return UndoOutcome.skippedGone;
+    if (s.cards.isNotEmpty) return UndoOutcome.skippedChanged;
     await gw.deleteBoard(id);
     return UndoOutcome.reverted;
   }
@@ -156,7 +178,7 @@ class _ColumnAdd extends _Base {
   @override
   Future<UndoRecord> apply(AssistAction a, ApplyScope scope) async {
     final board = scope.resolve(a.fields['board_id'] as String);
-    final name = _trim(a.fields['name']);
+    final name = _must(a.fields['name'], 'Name');
     if (hasName(await mustBoard(board), name)) {
       throw StateError('A column named $name already exists');
     }
@@ -208,7 +230,7 @@ class _ColumnRename extends _Base {
     final s = await mustBoard(board);
     final col = column(s, id) ?? (throw StateError('Column not found'));
     if (col.isDefault) throw StateError('The default column cannot be renamed');
-    final name = _trim(a.fields['name']);
+    final name = _must(a.fields['name'], 'Name');
     if (hasName(s, name, except: id)) {
       throw StateError('A column named $name already exists');
     }
@@ -231,8 +253,13 @@ class _ColumnRename extends _Base {
     final s = await snapshot(board);
     final col = s == null ? null : column(s, id);
     if (col == null) return UndoOutcome.skippedGone;
-    if (col.name != r.data['after']) return UndoOutcome.skippedChanged;
-    await gw.renameColumn(board, id, r.data['before'] as String);
+    final before = r.data['before'] as String;
+    // The backend matches options by name too, so a column the user has
+    // since given the old name would be overwritten.
+    if (col.name != r.data['after'] || hasName(s!, before, except: id)) {
+      return UndoOutcome.skippedChanged;
+    }
+    await gw.renameColumn(board, id, before);
     return UndoOutcome.reverted;
   }
 }
@@ -285,10 +312,14 @@ class _ColumnRemove extends _Base {
     final board = r.data['board_id'] as String;
     final s = await snapshot(board);
     if (s == null) return UndoOutcome.skippedGone;
-    if (column(s, r.data['column_id'] as String) != null) {
+    final id = r.data['column_id'] as String;
+    final name = r.data['name'] as String;
+    // A column back under that id or name (the backend matches options by
+    // name too) is the user's; leave it.
+    if (column(s, id) != null || hasName(s, name, except: id)) {
       return UndoOutcome.skippedChanged;
     }
-    final newId = await gw.addColumn(board, r.data['name'] as String);
+    final newId = await gw.addColumn(board, name);
     r.data['restored_id'] = newId;
     final home = s.columns.where((c) => c.isDefault).firstOrNull?.id;
     final ids = (r.data['card_ids'] as List).cast<String>();
@@ -323,8 +354,10 @@ class _CardAdd extends _Base {
   Future<UndoRecord> apply(AssistAction a, ApplyScope scope) async {
     final board = scope.resolve(a.fields['board_id'] as String);
     final col = scope.resolve(a.fields['column_id'] as String);
-    final title = _trim(a.fields['title']);
-    await mustBoard(board);
+    final title = _must(a.fields['title'], 'Title');
+    if (column(await mustBoard(board), col) == null) {
+      throw StateError('Column not found');
+    }
     final id = await gw.addCard(board, col, title);
     final temp = a.tempId;
     if (temp != null) scope.bind(temp, id);
@@ -398,9 +431,12 @@ class _CardUpdate extends _Base {
     final id = scope.resolve(f['card_id'] as String);
     final col =
         f['column_id'] == null ? null : scope.resolve(f['column_id'] as String);
-    final title = f['title'] == null ? null : _trim(f['title']);
-    final cur = card(await mustBoard(board), id) ??
-        (throw StateError('Card not found'));
+    final title = f['title'] == null ? null : _must(f['title'], 'Title');
+    final s = await mustBoard(board);
+    final cur = card(s, id) ?? (throw StateError('Card not found'));
+    if (col != null && column(s, col) == null) {
+      throw StateError('Column not found');
+    }
     await gw.updateCard(board, id, title: title, columnId: col);
     return UndoRecord(
       type: type,
@@ -503,13 +539,20 @@ Future<ContextPart> boardContext(
   final labels = <String, String>{};
   final ids = <String>{};
   final readOnly = <String>{};
+  // '<board id>#board': the board's column and card ids, for checkIds.
+  final items = <String, Map<String, dynamic>>{};
   for (final b in all) {
     ids.add(b.id);
     labels[b.id] = b.name;
     final entry = <String, dynamic>{'id': b.id, 'name': b.name};
+    if (b.isLocked) readOnly.add(b.id);
     final s = detailed.contains(b.id) ? await gw.board(b.id) : null;
     if (s != null) {
       if (!s.editable) readOnly.add(b.id);
+      items['${b.id}#board'] = {
+        'column_ids': [for (final c in s.columns) c.id],
+        'card_ids': [for (final c in s.cards) c.id],
+      };
       final names = {for (final c in s.columns) c.id: c.name};
       entry['columns'] = [
         for (final c in s.columns) {'id': c.id, 'name': c.name},
@@ -539,5 +582,6 @@ Future<ContextPart> boardContext(
     labels: labels,
     ids: ids,
     readOnlyIds: readOnly,
+    items: items,
   );
 }

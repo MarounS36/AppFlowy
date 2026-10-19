@@ -49,6 +49,13 @@ void main() {
   void page(String id, PageRef? r) =>
       when(() => gw.page(id)).thenAnswer((_) async => r);
 
+  void md(String id, String? text) => when(
+        () => gw.markdown(id, cap: any(named: 'cap')),
+      ).thenAnswer((_) async => text);
+
+  void kids(String id, List<String> ids) =>
+      when(() => gw.childIds(id)).thenAnswer((_) async => ids);
+
   AssistAction create(Map<String, dynamic> f) => act('page.create', {
         'temp_id': 'new:2',
         'parent_id': 's1',
@@ -69,6 +76,7 @@ void main() {
     page('p9', ref('p9'));
     when(() => gw.createPage('p9', 'Packing', '- [ ] Socks'))
         .thenAnswer((_) async => 'p10');
+    md('p10', '- [ ] Socks\n');
     final s = ApplyScope({'new:1': 'p9'});
     final r = await h['page.create']!.apply(
       create({'parent_id': 'new:1', 'name': ' Packing '}),
@@ -76,7 +84,7 @@ void main() {
     );
     expect(s.tempIds, {'new:1': 'p9', 'new:2': 'p10'});
     expect(r.type, 'page.create');
-    expect(r.data, {'page_id': 'p10'});
+    expect(r.data, {'page_id': 'p10', 'markdown': '- [ ] Socks\n'});
   });
 
   test('create failure binds nothing', () async {
@@ -88,14 +96,55 @@ void main() {
   });
 
   test('undo create trashes the page; gone is skipped', () async {
-    final rec = UndoRecord(type: 'page.create', data: {'page_id': 'p10'});
+    final rec = UndoRecord(
+      type: 'page.create',
+      data: {'page_id': 'p10', 'markdown': 'Socks'},
+    );
     page('p10', ref('p10'));
+    md('p10', 'Socks');
+    kids('p10', []);
     when(() => gw.delete('p10')).thenAnswer((_) async {});
     expect(await h['page.create']!.undo(rec), UndoOutcome.reverted);
     verify(() => gw.delete('p10')).called(1);
     page('p10', null);
     expect(await h['page.create']!.undo(rec), UndoOutcome.skippedGone);
     verifyNever(() => gw.delete('p10'));
+  });
+
+  test('undo create keeps a page written in or given pages since', () async {
+    final rec = UndoRecord(
+      type: 'page.create',
+      data: {'page_id': 'p10', 'markdown': 'Socks'},
+    );
+    page('p10', ref('p10'));
+    md('p10', 'Socks and more');
+    kids('p10', []);
+    expect(await h['page.create']!.undo(rec), UndoOutcome.skippedChanged);
+    md('p10', 'Socks');
+    kids('p10', ['p11']);
+    expect(await h['page.create']!.undo(rec), UndoOutcome.skippedChanged);
+    verifyNever(() => gw.delete(any()));
+  });
+
+  test('apply re-checks edited name and content before any write', () async {
+    page('s1', ref('s1', layout: 'space'));
+    page('p1', ref('p1'));
+    for (final a in [
+      create({'name': ' '}),
+      create({'name': 'a\nb'}),
+      create({'content': '  '}),
+      create({'content': 'x' * 20001}),
+      append({'content': ''}),
+      append({'content': 'x' * 20001}),
+    ]) {
+      await expectLater(
+        h[a.type]!.apply(a, ApplyScope({})),
+        throwsStateError,
+        reason: a.type,
+      );
+    }
+    verifyNever(() => gw.createPage(any(), any(), any()));
+    verifyNever(() => gw.append(any(), any()));
   });
 
   void remove(bool result) => when(

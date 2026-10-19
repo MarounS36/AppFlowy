@@ -5,7 +5,8 @@ import 'package:appflowy/features/assistant/logic/action_handler.dart';
 List<ActionHandler> pageContentHandlers(PageGateway gw) =>
     [_Create(gw), _Append(gw)];
 
-String? _name(Object? t) {
+/// Null = a valid page name, else why not.
+String? pageNameError(Object? t) {
   if (t is! String || t.trim().isEmpty) return 'Name is empty';
   if (t.trim().length > 120 || t.contains(RegExp(r'[\r\n]'))) {
     return 'Name is too long';
@@ -18,6 +19,9 @@ String? _content(Object? c) {
   if (c.length > 20000) return 'Content is too long';
   return null;
 }
+
+/// Above the 20000-char content cap, so undo compares whole pages.
+const _wholePage = 1 << 20;
 
 /// Temps made by these can hold pages.
 const pageContainerActions = {'page.create', 'board.create', 'database.create'};
@@ -60,7 +64,7 @@ class _Create extends _Base {
     final id = a.fields['parent_id'];
     if (!isPageParent(scope, id)) return 'Unknown parent_id';
     if (scope.readOnlyIds.contains(id)) return 'Page is locked';
-    return _name(a.fields['name']) ?? _content(a.fields['content']);
+    return pageNameError(a.fields['name']) ?? _content(a.fields['content']);
   }
 
   @override
@@ -76,6 +80,9 @@ class _Create extends _Base {
 
   @override
   Future<UndoRecord> apply(AssistAction a, ApplyScope scope) async {
+    mustBeValid(
+      pageNameError(a.fields['name']) ?? _content(a.fields['content']),
+    );
     final parent = scope.resolve(a.fields['parent_id'] as String);
     await mustPage(parent);
     final id = await gw.createPage(
@@ -83,15 +90,30 @@ class _Create extends _Base {
       (a.fields['name'] as String).trim(),
       a.fields['content'] as String,
     );
+    // What the page holds now, so undo can tell if the user changed it.
+    final String? md;
+    try {
+      md = await gw.markdown(id, cap: _wholePage);
+    } catch (_) {
+      try {
+        await gw.delete(id);
+      } catch (_) {}
+      rethrow;
+    }
     final temp = a.tempId;
     if (temp != null) scope.bind(temp, id);
-    return UndoRecord(type: type, data: {'page_id': id});
+    return UndoRecord(type: type, data: {'page_id': id, 'markdown': md});
   }
 
+  /// A page the user has written in or put pages under since is kept.
   @override
   Future<UndoOutcome> undo(UndoRecord r) async {
     final id = r.data['page_id'] as String;
     if (await gw.page(id) == null) return UndoOutcome.skippedGone;
+    if ((await gw.childIds(id)).isNotEmpty ||
+        await gw.markdown(id, cap: _wholePage) != r.data['markdown']) {
+      return UndoOutcome.skippedChanged;
+    }
     await gw.delete(id);
     return UndoOutcome.reverted;
   }
@@ -124,6 +146,7 @@ class _Append extends _Base {
 
   @override
   Future<UndoRecord> apply(AssistAction a, ApplyScope scope) async {
+    mustBeValid(_content(a.fields['content']));
     final id = scope.resolve(a.fields['page_id'] as String);
     if ((await mustPage(id)).layout != 'document') {
       throw StateError('Not a document page');

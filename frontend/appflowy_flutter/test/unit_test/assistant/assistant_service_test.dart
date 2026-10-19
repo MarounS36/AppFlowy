@@ -209,6 +209,7 @@ void main() {
     bodies = [];
     tokens = ['t1'];
     when(() => calendar.findMyWeek()).thenAnswer((_) async => 'week');
+    when(() => calendar.isLocked(any())).thenAnswer((_) async => false);
     when(() => calendar.entries(any(), any(), any())).thenAnswer(
       (_) async => [
         CalendarEntry(
@@ -222,9 +223,9 @@ void main() {
     );
     when(() => boards.boards()).thenAnswer(
       (_) async => [
-        (id: 'b1', name: 'Sprint'),
-        (id: 'b2', name: 'Home Reno'),
-        (id: 'b3', name: 'Garden'),
+        (id: 'b1', name: 'Sprint', isLocked: false),
+        (id: 'b2', name: 'Home Reno', isLocked: false),
+        (id: 'b3', name: 'Garden', isLocked: false),
       ],
     );
     when(() => boards.board(any())).thenAnswer((_) async => null);

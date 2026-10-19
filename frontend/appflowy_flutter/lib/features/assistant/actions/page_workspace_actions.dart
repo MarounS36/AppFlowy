@@ -61,14 +61,8 @@ class _Rename extends _Base {
   List<String> get editable => const ['name'];
 
   @override
-  String? validate(AssistAction a, ValidationScope scope) {
-    final n = a.fields['name'];
-    if (n is! String || n.trim().isEmpty) return 'Name is empty';
-    if (n.trim().length > 120 || n.contains(RegExp(r'[\r\n]'))) {
-      return 'Name is too long';
-    }
-    return super.validate(a, scope);
-  }
+  String? validate(AssistAction a, ValidationScope scope) =>
+      pageNameError(a.fields['name']) ?? super.validate(a, scope);
 
   @override
   String text(AssistAction a, String label) => 'Rename page';
@@ -84,6 +78,7 @@ class _Rename extends _Base {
 
   @override
   Future<UndoRecord> apply(AssistAction a, ApplyScope scope) async {
+    mustBeValid(pageNameError(a.fields['name']));
     final id = a.fields['page_id'] as String;
     final before = (await mustPage(id)).name;
     final after = (a.fields['name'] as String).trim();
@@ -215,15 +210,36 @@ class _Duplicate extends _Base {
     final id = a.fields['page_id'] as String;
     await mustPage(id);
     final copy = await gw.duplicate(id);
+    // How the copy looks now, so undo can tell if the user changed it.
+    final String name;
+    final int children;
+    try {
+      name = (await gw.page(copy))?.name ?? (throw StateError('Copy is gone'));
+      children = (await gw.childIds(copy)).length;
+    } catch (_) {
+      try {
+        await gw.delete(copy);
+      } catch (_) {}
+      rethrow;
+    }
     final temp = a.tempId;
     if (temp != null) scope.bind(temp, copy);
-    return UndoRecord(type: type, data: {'page_id': copy});
+    return UndoRecord(
+      type: type,
+      data: {'page_id': copy, 'name': name, 'children': children},
+    );
   }
 
+  /// A copy the user has renamed or added/removed pages under is kept.
   @override
   Future<UndoOutcome> undo(UndoRecord r) async {
     final id = r.data['page_id'] as String;
-    if (await gw.page(id) == null) return UndoOutcome.skippedGone;
+    final p = await gw.page(id);
+    if (p == null) return UndoOutcome.skippedGone;
+    if (p.name != r.data['name'] ||
+        (await gw.childIds(id)).length != r.data['children']) {
+      return UndoOutcome.skippedChanged;
+    }
     await gw.delete(id);
     return UndoOutcome.reverted;
   }

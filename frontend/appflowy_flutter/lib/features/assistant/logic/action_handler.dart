@@ -21,6 +21,12 @@ class ActionPreview {
 
 enum UndoOutcome { reverted, skippedChanged, skippedGone }
 
+/// Throws when [err] is set. Apply re-checks fields the user may have edited
+/// in the preview.
+void mustBeValid(String? err) {
+  if (err != null) throw StateError(err);
+}
+
 /// Temp ids (`new:N`) the AI uses for things created earlier in the same
 /// proposal, bound to real ids as they are created. Shared across one apply.
 class ApplyScope {

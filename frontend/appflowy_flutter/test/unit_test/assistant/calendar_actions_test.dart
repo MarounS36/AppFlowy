@@ -47,6 +47,7 @@ void main() {
     gw = _MockGateway();
     h = {for (final x in calendarHandlers(gw)) x.type: x};
     scope = ValidationScope(knownIds: {'r1'}, weekStart: week);
+    when(() => gw.isLocked(any())).thenAnswer((_) async => false);
   });
 
   test('add: ensures My Week, adds, records new id', () async {
@@ -331,6 +332,279 @@ void main() {
     when(() => gw.entry('v1', 'r9'))
         .thenAnswer((_) async => entry('r9', 'Gym2', mine.start, mine.end));
     expect(await h['calendar.add']!.undo(r), UndoOutcome.skippedChanged);
+  });
+
+  group('date writes', () {
+    test('a single point sends no end, a range sends its end', () {
+      final point = entry(
+        'r1',
+        'Trip',
+        DateTime(2026, 10, 21),
+        DateTime(2026, 10, 21),
+        allDay: true,
+      );
+      expect(
+        dateWriteArgs(point),
+        (
+          date: DateTime(2026, 10, 21),
+          endDate: null,
+          isRange: false,
+          includeTime: false,
+        ),
+      );
+      final timedPoint = entry(
+        'r2',
+        'Call',
+        DateTime(2026, 10, 21, 9),
+        DateTime(2026, 10, 21, 9),
+        isRange: false,
+      );
+      expect(dateWriteArgs(timedPoint).endDate, isNull);
+      expect(dateWriteArgs(timedPoint).includeTime, isTrue);
+      expect(
+        dateWriteArgs(dentist),
+        (
+          date: dentist.start,
+          endDate: dentist.end,
+          isRange: true,
+          includeTime: true,
+        ),
+      );
+    });
+
+    test('sameDate: start, kind, and the end only for a range', () {
+      expect(sameDate(dentist, dentist), isTrue);
+      final shorter =
+          entry('r1', 'X', dentist.start, DateTime(2026, 10, 20, 16, 30));
+      expect(sameDate(dentist, shorter), isFalse);
+      final point = entry(
+        'r1',
+        'X',
+        dentist.start,
+        dentist.start,
+        isRange: false,
+      );
+      expect(
+        sameDate(
+          point,
+          entry(
+            'r1',
+            'Y',
+            dentist.start,
+            dentist.end,
+            isRange: false,
+          ),
+        ),
+        isTrue,
+      );
+      expect(sameDate(point, dentist), isFalse);
+    });
+  });
+
+  group('timed entries with no end', () {
+    final call = entry(
+      'r3',
+      'Call mom',
+      DateTime(2026, 10, 20, 18),
+      DateTime(2026, 10, 20, 18),
+      isRange: false,
+    );
+    Future<CalendarEntry> update(Map<String, dynamic> f) async {
+      when(() => gw.findMyWeek()).thenAnswer((_) async => 'v1');
+      when(() => gw.entry('v1', 'r3')).thenAnswer((_) async => call);
+      when(() => gw.update('v1', 'r3', any())).thenAnswer((_) async {});
+      await h['calendar.update']!.apply(
+        act('calendar.update', {'entry_id': 'r3', ...f}),
+        ApplyScope({}),
+      );
+      return verify(() => gw.update('v1', 'r3', captureAny())).captured.single
+          as CalendarEntry;
+    }
+
+    test('title-only update keeps a single point', () async {
+      final e = await update({'title': 'Call dad'});
+      expect(e.title, 'Call dad');
+      expect(e.start, call.start);
+      expect(e.end, call.start);
+      expect(e.isRange, isFalse);
+      expect(e.allDay, isFalse);
+    });
+
+    test('start-only update moves the point', () async {
+      final e = await update({'start': '19:30'});
+      expect(e.start, DateTime(2026, 10, 20, 19, 30));
+      expect(e.end, e.start);
+      expect(e.isRange, isFalse);
+    });
+
+    test('"to Wednesday 17:00" with no end works', () async {
+      final e = await update({'date': '2026-10-21', 'start': '17:00'});
+      expect(e.start, DateTime(2026, 10, 21, 17));
+      expect(e.isRange, isFalse);
+    });
+
+    test('giving an end makes it a range', () async {
+      final e = await update({'end': '19:00'});
+      expect(e.start, call.start);
+      expect(e.end, DateTime(2026, 10, 20, 19));
+      expect(e.isRange, isTrue);
+    });
+
+    test('add with a start and no end adds a single point', () async {
+      when(() => gw.ensureMyWeek()).thenAnswer((_) async => 'v1');
+      when(() => gw.add('v1', any())).thenAnswer((_) async => 'r9');
+      final a = act('calendar.add', {
+        'title': 'Call',
+        'date': '2026-10-21',
+        'start': '18:00',
+      });
+      expect(h['calendar.add']!.validate(a, scope), isNull);
+      await h['calendar.add']!.apply(a, ApplyScope({}));
+      final e = verify(() => gw.add('v1', captureAny())).captured.single
+          as CalendarEntry;
+      expect(e.start, DateTime(2026, 10, 21, 18));
+      expect(e.end, e.start);
+      expect(e.isRange, isFalse);
+      expect(h['calendar.add']!.describe(a, {}).text, 'Add: Call · Wed 18:00');
+    });
+
+    test('context sends no end and labels it as a point', () async {
+      when(() => gw.findMyWeek()).thenAnswer((_) async => 'v1');
+      when(() => gw.entries('v1', any(), any()))
+          .thenAnswer((_) async => [call]);
+      final c = await calendarContext(gw, week);
+      final json = (c.json['entries'] as List).single as Map;
+      expect(json['start'], '18:00');
+      expect(json['end'], isNull);
+      expect(json['is_range'], false);
+      expect(c.labels['r3'], 'Call mom · Tue 18:00');
+      final u = h['calendar.update']!.describe(
+        act('calendar.update', {'entry_id': 'r3', 'start': '19:00'}),
+        c.labels,
+      );
+      expect(u.after, 'Call mom · Tue 19:00');
+    });
+  });
+
+  group('locked My Week', () {
+    setUp(() {
+      when(() => gw.isLocked('v1')).thenAnswer((_) async => true);
+      when(() => gw.findMyWeek()).thenAnswer((_) async => 'v1');
+      when(() => gw.ensureMyWeek()).thenAnswer((_) async => 'v1');
+      when(() => gw.entry('v1', 'r1')).thenAnswer((_) async => dentist);
+    });
+
+    test('apply refuses every calendar write', () async {
+      for (final a in [
+        act('calendar.add', {
+          'title': 'Gym',
+          'date': '2026-10-21',
+          'start': '18:00',
+          'end': '19:00',
+        }),
+        act('calendar.update', {'entry_id': 'r1', 'title': 'X'}),
+        act('calendar.remove', {'entry_id': 'r1'}),
+      ]) {
+        await expectLater(
+          h[a.type]!.apply(a, ApplyScope({})),
+          throwsStateError,
+          reason: a.type,
+        );
+      }
+      verifyNever(() => gw.add(any(), any()));
+      verifyNever(() => gw.update(any(), any(), any()));
+      verifyNever(() => gw.remove(any(), any()));
+    });
+
+    test('undo writes nothing and reports changed', () async {
+      final after = {
+        'title': 'Dentist',
+        'start': DateTime(2026, 10, 20, 16).toIso8601String(),
+        'end': DateTime(2026, 10, 20, 17).toIso8601String(),
+        'all_day': false,
+        'is_range': true,
+      };
+      UndoRecord rec(String type, Map<String, dynamic> extra) => UndoRecord(
+            type: type,
+            data: {'view_id': 'v1', 'entry_id': 'r1', ...extra},
+          );
+      expect(
+        await h['calendar.add']!.undo(rec('calendar.add', {'after': after})),
+        UndoOutcome.skippedChanged,
+      );
+      expect(
+        await h['calendar.update']!.undo(
+          rec('calendar.update', {'before': after, 'after': after}),
+        ),
+        UndoOutcome.skippedChanged,
+      );
+      when(() => gw.entry('v1', 'r1')).thenAnswer((_) async => null);
+      expect(
+        await h['calendar.remove']!
+            .undo(rec('calendar.remove', {'before': after})),
+        UndoOutcome.skippedChanged,
+      );
+      verifyNever(() => gw.add(any(), any()));
+      verifyNever(() => gw.update(any(), any(), any()));
+      verifyNever(() => gw.remove(any(), any()));
+    });
+
+    test('context marks every entry read-only; validate drops them', () async {
+      when(() => gw.entries('v1', any(), any()))
+          .thenAnswer((_) async => [dentist]);
+      final c = await calendarContext(gw, week);
+      expect(c.readOnlyIds, {'r1'});
+      final s = ValidationScope(
+        knownIds: c.ids,
+        weekStart: week,
+        readOnlyIds: c.readOnlyIds,
+      );
+      expect(
+        h['calendar.update']!.validate(
+          act('calendar.update', {'entry_id': 'r1', 'title': 'X'}),
+          s,
+        ),
+        'My Week is locked',
+      );
+      expect(
+        h['calendar.remove']!
+            .validate(act('calendar.remove', {'entry_id': 'r1'}), s),
+        'My Week is locked',
+      );
+    });
+  });
+
+  test('apply re-checks edited fields before any write', () async {
+    when(() => gw.ensureMyWeek()).thenAnswer((_) async => 'v1');
+    when(() => gw.findMyWeek()).thenAnswer((_) async => 'v1');
+    when(() => gw.entry('v1', 'r1')).thenAnswer((_) async => dentist);
+    final add = {
+      'title': 'Gym',
+      'date': '2026-10-21',
+      'start': '18:00',
+      'end': '19:00',
+    };
+    for (final a in [
+      act('calendar.add', {...add, 'start': '6pm'}),
+      act('calendar.add', {...add, 'date': '2026-13-01'}),
+      act('calendar.add', {...add, 'end': '17:00'}),
+      act('calendar.add', {...add, 'title': ' '}),
+      act('calendar.update', {'entry_id': 'r1', 'start': '25:00'}),
+      act('calendar.update', {'entry_id': 'r1', 'date': 'Wednesday'}),
+      act('calendar.update', {'entry_id': 'r1', 'title': 'a\nb'}),
+      act(
+        'calendar.update',
+        {'entry_id': 'r1', 'start': '18:00', 'end': '17:00'},
+      ),
+    ]) {
+      await expectLater(
+        h[a.type]!.apply(a, ApplyScope({})),
+        throwsStateError,
+        reason: '${a.fields}',
+      );
+    }
+    verifyNever(() => gw.add(any(), any()));
+    verifyNever(() => gw.update(any(), any(), any()));
   });
 
   group('calendarContext', () {

@@ -39,6 +39,12 @@ void main() {
       knownIds: {'b1', 'c1', 'c2', 'k1'},
       weekStart: DateTime(2026, 10, 19),
       readOnlyIds: {'ro'},
+      items: {
+        'b1#board': {
+          'column_ids': ['c1', 'c2'],
+          'card_ids': ['k1'],
+        },
+      },
     );
   });
 
@@ -99,8 +105,25 @@ void main() {
     expect(await h['board.create']!.undo(rec), UndoOutcome.skippedGone);
   });
 
+  test('undo create keeps a board the user has put cards on', () async {
+    final rec = UndoRecord(
+      type: 'board.create',
+      data: {'board_id': 'b1', 'column_ids': <String>[]},
+    );
+    board(snap(cards: [const BoardCard(id: 'k1', title: 'A', columnId: 'c1')]));
+    expect(await h['board.create']!.undo(rec), UndoOutcome.skippedChanged);
+    verifyNever(() => gw.deleteBoard(any()));
+  });
+
   test('card.add into a new: column resolves via scope', () async {
-    board(snap());
+    board(
+      snap(
+        cols: [
+          none,
+          const BoardColumn(id: 'c7', name: 'New', isDefault: false),
+        ],
+      ),
+    );
     when(() => gw.addCard('b1', 'c7', 'Write')).thenAnswer((_) async => 'k9');
     final s = ApplyScope({'new:2': 'c7'});
     final r = await h['board.card.add']!.apply(
@@ -370,6 +393,54 @@ void main() {
     verify(() => gw.addColumn('b1', 'To do')).called(1);
   });
 
+  test('column.rename undo skipped when another column took the old name',
+      () async {
+    final r = UndoRecord(
+      type: 'board.column.rename',
+      data: {
+        'board_id': 'b1',
+        'column_id': 'c1',
+        'before': 'To do',
+        'after': 'Later',
+      },
+    );
+    board(
+      snap(
+        cols: [
+          none,
+          const BoardColumn(id: 'c1', name: 'Later', isDefault: false),
+          const BoardColumn(id: 'c3', name: 'to do', isDefault: false),
+        ],
+      ),
+    );
+    expect(await h['board.column.rename']!.undo(r), UndoOutcome.skippedChanged);
+    verifyNever(() => gw.renameColumn(any(), any(), any()));
+  });
+
+  test('column.remove undo skipped when a column has its name again', () async {
+    final r = UndoRecord(
+      type: 'board.column.remove',
+      data: {
+        'board_id': 'b1',
+        'column_id': 'c1',
+        'name': 'To do',
+        'card_ids': <String>[],
+      },
+    );
+    board(
+      snap(
+        cols: [
+          none,
+          doing,
+          const BoardColumn(id: 'c8', name: 'To Do', isDefault: false),
+        ],
+      ),
+    );
+    expect(await h['board.column.remove']!.undo(r), UndoOutcome.skippedChanged);
+    verifyNever(() => gw.addColumn(any(), any()));
+    expect(r.data['restored_id'], isNull);
+  });
+
   test('column.remove undo skipped when a column exists again', () async {
     final r = UndoRecord(
       type: 'board.column.remove',
@@ -483,7 +554,10 @@ void main() {
   test('context: all boards, detailed columns/cards, labels, read-only',
       () async {
     when(() => gw.boards()).thenAnswer(
-      (_) async => [(id: 'b1', name: 'Plan'), (id: 'b2', name: 'Other')],
+      (_) async => [
+        (id: 'b1', name: 'Plan', isLocked: false),
+        (id: 'b2', name: 'Other', isLocked: false),
+      ],
     );
     board(
       snap(
@@ -515,8 +589,193 @@ void main() {
     expect(p.labels['c1#cards'], 'A, B');
     expect(p.labels['b1#default'], 'No Status');
     expect(p.labels['k1#column'], 'To do');
+    expect(p.items['b1#board'], {
+      'column_ids': ['c0', 'c1', 'c2'],
+      'card_ids': ['k1', 'k2'],
+    });
     final p2 = await boardContext(gw, ['b1', 'b2']);
     expect(p2.readOnlyIds, {'b2'});
+  });
+
+  test('context: a locked board is read-only, detailed or not', () async {
+    when(() => gw.boards()).thenAnswer(
+      (_) async => [
+        (id: 'b1', name: 'Plan', isLocked: true),
+        (id: 'b2', name: 'Other', isLocked: true),
+      ],
+    );
+    board(snap(editable: false));
+    final p = await boardContext(gw, ['b1']);
+    expect(p.readOnlyIds, {'b1', 'b2'});
+    final s = ValidationScope(
+      knownIds: p.ids,
+      weekStart: DateTime(2026, 10, 19),
+      readOnlyIds: p.readOnlyIds,
+      items: p.items,
+    );
+    expect(
+      h['board.column.add']!.validate(
+        act('board.column.add', {
+          'board_id': 'b2',
+          'temp_id': 'new:3',
+          'name': 'X',
+        }),
+        s,
+      ),
+      'Board is read-only',
+    );
+    expect(
+      h['board.card.remove']!.validate(
+        act('board.card.remove', {'board_id': 'b1', 'card_id': 'k1'}),
+        s,
+      ),
+      isNotNull,
+    );
+  });
+
+  test('undo on a board that is no longer editable writes nothing', () async {
+    board(snap(cards: [const BoardCard(id: 'k1', title: 'A', columnId: 'c1')]));
+    when(() => gw.removeCard('b1', 'k1')).thenAnswer((_) async {});
+    final r = await h['board.card.remove']!.apply(
+      act('board.card.remove', {'board_id': 'b1', 'card_id': 'k1'}),
+      ApplyScope({}),
+    );
+    board(snap(editable: false)); // locked since
+    await expectLater(h['board.card.remove']!.undo(r), throwsStateError);
+    verifyNever(() => gw.addCard(any(), any(), any()));
+  });
+
+  test('column ids and card ids must belong to the given board', () {
+    String? v(String t, Map<String, dynamic> f) =>
+        h[t]!.validate(act(t, f), scope);
+    scope.knownIds.addAll({'b2', 'c9', 'k9'});
+    scope.items['b2#board'] = {
+      'column_ids': ['c9'],
+      'card_ids': ['k9'],
+    };
+    expect(
+      v('board.card.add', {
+        'board_id': 'b1',
+        'column_id': 'c9',
+        'temp_id': 'new:4',
+        'title': 'T',
+      }),
+      'Unknown column_id',
+    );
+    expect(
+      v('board.card.update', {
+        'board_id': 'b1',
+        'card_id': 'k9',
+        'title': 'T',
+      }),
+      'Unknown card_id',
+    );
+    expect(
+      v('board.column.rename', {
+        'board_id': 'b2',
+        'column_id': 'c1',
+        'name': 'X',
+      }),
+      'Unknown column_id',
+    );
+    // A card id is not a column id.
+    expect(
+      v('board.card.update', {
+        'board_id': 'b1',
+        'card_id': 'k1',
+        'column_id': 'k1',
+      }),
+      'Unknown column_id',
+    );
+    expect(
+      v('board.card.update', {
+        'board_id': 'b2',
+        'card_id': 'k9',
+        'column_id': 'c9',
+      }),
+      isNull,
+    );
+  });
+
+  test('apply refuses a column that is not on the board', () async {
+    board(snap(cards: [const BoardCard(id: 'k1', title: 'A', columnId: 'c1')]));
+    final s = ApplyScope({'new:2': 'c9'});
+    await expectLater(
+      h['board.card.add']!.apply(
+        act('board.card.add', {
+          'board_id': 'b1',
+          'column_id': 'new:2',
+          'temp_id': 'new:4',
+          'title': 'T',
+        }),
+        s,
+      ),
+      throwsStateError,
+    );
+    await expectLater(
+      h['board.card.update']!.apply(
+        act('board.card.update', {
+          'board_id': 'b1',
+          'card_id': 'k1',
+          'column_id': 'new:2',
+        }),
+        s,
+      ),
+      throwsStateError,
+    );
+    verifyNever(() => gw.addCard(any(), any(), any()));
+    verifyNever(
+      () => gw.updateCard(
+        any(),
+        any(),
+        title: any(named: 'title'),
+        columnId: any(named: 'columnId'),
+      ),
+    );
+  });
+
+  test('apply re-checks edited names and titles', () async {
+    board(snap(cards: [const BoardCard(id: 'k1', title: 'A', columnId: 'c1')]));
+    for (final a in [
+      act('board.create', {
+        'temp_id': 'new:1',
+        'name': '  ',
+        'columns': [
+          {'temp_id': 'new:2', 'name': 'A'},
+        ],
+      }),
+      act('board.column.add', {
+        'board_id': 'b1',
+        'temp_id': 'new:3',
+        'name': 'a\nb',
+      }),
+      act('board.column.rename', {
+        'board_id': 'b1',
+        'column_id': 'c1',
+        'name': '',
+      }),
+      act('board.card.add', {
+        'board_id': 'b1',
+        'column_id': 'c1',
+        'temp_id': 'new:4',
+        'title': 'x' * 121,
+      }),
+      act('board.card.update', {
+        'board_id': 'b1',
+        'card_id': 'k1',
+        'title': ' ',
+      }),
+    ]) {
+      await expectLater(
+        h[a.type]!.apply(a, ApplyScope({})),
+        throwsStateError,
+        reason: a.type,
+      );
+    }
+    verifyNever(() => gw.createBoard(any(), any()));
+    verifyNever(() => gw.addColumn(any(), any()));
+    verifyNever(() => gw.renameColumn(any(), any(), any()));
+    verifyNever(() => gw.addCard(any(), any(), any()));
   });
 
   test('apply refuses a non-editable or missing board before any write',

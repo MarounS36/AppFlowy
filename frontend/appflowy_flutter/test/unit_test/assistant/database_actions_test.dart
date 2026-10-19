@@ -613,10 +613,24 @@ void main() {
         data: {'database_id': 'd1'},
       );
       when(() => gw.deleteDatabase('d1')).thenAnswer((_) async {});
+      db(snap());
       expect(await h['database.create']!.undo(rec), UndoOutcome.reverted);
       verify(() => gw.deleteDatabase('d1')).called(1);
-      when(() => gw.databases()).thenAnswer((_) async => []);
+      db(null);
       expect(await h['database.create']!.undo(rec), UndoOutcome.skippedGone);
+    });
+
+    test('undo keeps a database the user has added rows to, or locked',
+        () async {
+      final rec = UndoRecord(
+        type: 'database.create',
+        data: {'database_id': 'd1'},
+      );
+      db(snap(rows: [dune]));
+      expect(await h['database.create']!.undo(rec), UndoOutcome.skippedChanged);
+      db(snap(locked: true));
+      expect(await h['database.create']!.undo(rec), UndoOutcome.skippedChanged);
+      verifyNever(() => gw.deleteDatabase(any()));
     });
   });
 

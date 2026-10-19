@@ -194,6 +194,21 @@ void main() {
       expect(h['page.rename']!.apply(a, ApplyScope({})), throwsStateError);
       verifyNever(() => gw.rename(any(), any()));
     });
+
+    test('apply re-checks an edited name', () async {
+      page('p1', ref('p1', name: 'Old'));
+      for (final n in ['', '  ', 'a\nb', 'x' * 121]) {
+        await expectLater(
+          h['page.rename']!.apply(
+            act('page.rename', {'page_id': 'p1', 'name': n}),
+            ApplyScope({}),
+          ),
+          throwsStateError,
+          reason: n,
+        );
+      }
+      verifyNever(() => gw.rename(any(), any()));
+    });
   });
 
   group('move', () {
@@ -294,19 +309,51 @@ void main() {
   group('duplicate', () {
     final a = act('page.duplicate', {'page_id': 'p1', 'temp_id': 'new:3'});
 
+    void kids(String id, List<String> ids) =>
+        when(() => gw.childIds(id)).thenAnswer((_) async => ids);
+
     test('binds copy; undo trashes it, skippedGone when gone', () async {
       page('p1', ref('p1'));
       when(() => gw.duplicate('p1')).thenAnswer((_) async => 'p7');
       when(() => gw.delete('p7')).thenAnswer((_) async {});
+      page('p7', ref('p7', name: 'P (copy)'));
+      kids('p7', ['k1']);
       final s = ApplyScope({});
       final r = await h['page.duplicate']!.apply(a, s);
       expect(s.tempIds, {'new:3': 'p7'});
-      expect(r.data, {'page_id': 'p7'});
-      page('p7', ref('p7'));
+      expect(r.data, {'page_id': 'p7', 'name': 'P (copy)', 'children': 1});
       expect(await h['page.duplicate']!.undo(r), UndoOutcome.reverted);
       verify(() => gw.delete('p7')).called(1);
       page('p7', null);
       expect(await h['page.duplicate']!.undo(r), UndoOutcome.skippedGone);
+    });
+
+    test('undo keeps a copy renamed or given other pages since', () async {
+      page('p1', ref('p1'));
+      when(() => gw.duplicate('p1')).thenAnswer((_) async => 'p7');
+      page('p7', ref('p7', name: 'P (copy)'));
+      kids('p7', ['k1']);
+      final r = await h['page.duplicate']!.apply(a, ApplyScope({}));
+      page('p7', ref('p7', name: 'Mine'));
+      expect(await h['page.duplicate']!.undo(r), UndoOutcome.skippedChanged);
+      page('p7', ref('p7', name: 'P (copy)'));
+      kids('p7', ['k1', 'k2']);
+      expect(await h['page.duplicate']!.undo(r), UndoOutcome.skippedChanged);
+      kids('p7', []);
+      expect(await h['page.duplicate']!.undo(r), UndoOutcome.skippedChanged);
+      verifyNever(() => gw.delete(any()));
+    });
+
+    test('a failed read of the copy trashes it and binds nothing', () async {
+      page('p1', ref('p1'));
+      when(() => gw.duplicate('p1')).thenAnswer((_) async => 'p7');
+      when(() => gw.delete('p7')).thenAnswer((_) async {});
+      page('p7', ref('p7'));
+      when(() => gw.childIds('p7')).thenThrow(StateError('x'));
+      final s = ApplyScope({});
+      await expectLater(h['page.duplicate']!.apply(a, s), throwsStateError);
+      verify(() => gw.delete('p7')).called(1);
+      expect(s.tempIds, isEmpty);
     });
 
     test('failure binds nothing', () async {

@@ -30,8 +30,26 @@ class CalendarEntry {
   final bool allDay;
 
   /// The date cell's own range flag (a multi-day all-day entry has it).
+  /// Without it the entry is a single point and [end] == [start].
   final bool isRange;
 }
+
+/// What the date cell is written with. The backend keeps the old cell when
+/// an end comes without `isRange`, so a single point sends no end.
+({DateTime date, DateTime? endDate, bool isRange, bool includeTime})
+    dateWriteArgs(CalendarEntry e) => (
+          date: e.start,
+          endDate: e.isRange ? e.end : null,
+          isRange: e.isRange,
+          includeTime: !e.allDay,
+        );
+
+/// Same start, kind, and (for a range) end; titles aside.
+bool sameDate(CalendarEntry a, CalendarEntry b) =>
+    a.start == b.start &&
+    a.allDay == b.allDay &&
+    a.isRange == b.isRange &&
+    (!a.isRange || a.end == b.end);
 
 const myWeekName = 'My Week';
 
@@ -60,6 +78,10 @@ class CalendarGateway {
     );
     return view.getOrThrow().id;
   }
+
+  /// A lock may be set after the proposal, so writers check it each time.
+  Future<bool> isLocked(String viewId) async =>
+      (await ViewBackendService.getView(viewId)).getOrThrow().isLocked;
 
   Future<String> _dateFieldId(String viewId) async {
     final s = await DatabaseViewBackendService(viewId: viewId)
@@ -132,17 +154,23 @@ class CalendarGateway {
 
   Future<void> _setDate(String viewId, String rowId, CalendarEntry e) async {
     final fieldId = await _dateFieldId(viewId);
+    final a = dateWriteArgs(e);
     (await DateCellBackendService(
       viewId: viewId,
       fieldId: fieldId,
       rowId: rowId,
     ).update(
-      date: e.start,
-      endDate: e.end,
-      isRange: e.isRange,
-      includeTime: !e.allDay,
+      date: a.date,
+      endDate: a.endDate,
+      isRange: a.isRange,
+      includeTime: a.includeTime,
     ))
         .getOrThrow();
+    // The backend can keep the old cell without an error; read it back.
+    final got = await entry(viewId, rowId);
+    if (got == null || !sameDate(got, e)) {
+      throw StateError('The date was not saved');
+    }
   }
 
   Future<String> add(String viewId, CalendarEntry e) async {
@@ -162,8 +190,8 @@ class CalendarGateway {
     return row.id;
   }
 
-  /// Writes only what changed; if the date write fails after the title was
-  /// written, the title is put back before rethrowing.
+  /// Writes only what changed and reads the date back; if that fails, the
+  /// old title and date are put back before rethrowing.
   Future<void> update(String viewId, String rowId, CalendarEntry e) async {
     final old = await entry(viewId, rowId) ?? (throw StateError('Gone'));
     final primary = (await FieldBackendService.getPrimaryField(viewId: viewId))
@@ -190,6 +218,11 @@ class CalendarGateway {
           await setTitle(old.title);
         } catch (_) {}
       }
+      // Harmless when the write itself failed; undoes one the read-back
+      // found wrong.
+      try {
+        await _setDate(viewId, rowId, old);
+      } catch (_) {}
       rethrow;
     }
   }

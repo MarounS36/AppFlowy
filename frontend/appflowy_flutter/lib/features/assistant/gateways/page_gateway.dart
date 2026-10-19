@@ -155,6 +155,13 @@ class PageGateway {
       ))
           .getOrThrow();
 
+  /// Its child pages' ids.
+  Future<List<String>> childIds(String pageId) async => [
+        for (final v in (await ViewBackendService.getChildViews(viewId: pageId))
+            .getOrThrow())
+          v.id,
+      ];
+
   /// The sibling right before the page, null if first or missing.
   Future<String?> prevSiblingId(String pageId) async {
     final v = (await ViewBackendService.getView(pageId)).toNullable();
