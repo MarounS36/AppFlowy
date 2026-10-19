@@ -1,4 +1,5 @@
 import 'package:appflowy/features/assistant/logic/assistant_service.dart';
+import 'package:appflowy/features/assistant/presentation/assistant_availability_builder.dart';
 import 'package:appflowy/features/assistant/presentation/assistant_dialog.dart';
 import 'package:appflowy/generated/flowy_svgs.g.dart';
 import 'package:appflowy/generated/locale_keys.g.dart';
@@ -8,46 +9,30 @@ import 'package:flowy_infra_ui/flowy_infra_ui.dart';
 import 'package:flutter/material.dart';
 
 /// Page-header button; hidden unless Ask InkNest is available.
-class AskInkNestButton extends StatefulWidget {
+class AskInkNestButton extends StatelessWidget {
   const AskInkNestButton({super.key, this.pinnedIds = const []});
 
   final List<String> pinnedIds;
 
   @override
-  State<AskInkNestButton> createState() => _AskInkNestButtonState();
-}
-
-class _AskInkNestButtonState extends State<AskInkNestButton> {
-  late final Future<bool> _available = _check();
-
-  Future<bool> _check() async {
-    try {
-      return await AssistantService.isAvailable();
-    } catch (_) {
-      return false;
-    }
-  }
-
-  @override
   Widget build(BuildContext context) {
-    return FutureBuilder<bool>(
-      future: _available,
-      builder: (context, snapshot) {
-        if (snapshot.data != true) return const SizedBox.shrink();
-        return Padding(
-          padding: const EdgeInsets.only(right: 10),
-          child: FlowyTooltip(
-            message: LocaleKeys.assistant_title.tr(),
-            child: FlowyIconButton(
-              width: 28,
-              height: 28,
-              icon: const FlowySvg(FlowySvgs.ai_sparks_s),
-              onPressed: () =>
-                  showAssistantDialog(context, pinnedIds: widget.pinnedIds),
-            ),
+    return AssistantAvailabilityBuilder(
+      builder: (_) => Padding(
+        padding: const EdgeInsets.only(right: 10),
+        child: FlowyTooltip(
+          message: LocaleKeys.assistant_title.tr(),
+          child: FlowyIconButton(
+            width: 28,
+            height: 28,
+            icon: const FlowySvg(FlowySvgs.ai_sparks_s),
+            onPressed: () async {
+              if (!await AssistantService.isAvailable()) return;
+              if (!context.mounted) return;
+              await showAssistantDialog(context, pinnedIds: pinnedIds);
+            },
           ),
-        );
-      },
+        ),
+      ),
     );
   }
 }

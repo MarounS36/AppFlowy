@@ -25,8 +25,9 @@ Future<void> showAssistantSheet(
     showDragHandle: true,
     showHeader: true,
     title: LocaleKeys.assistant_title.tr(),
-    builder: (_) => SizedBox(
-      height: MediaQuery.of(context).size.height * 0.85,
+    builder: (sheetContext) => SizedBox(
+      height: MediaQuery.sizeOf(sheetContext).height * 0.85 -
+          MediaQuery.viewInsetsOf(sheetContext).bottom,
       child: AssistantView(service: service, pinnedIds: pinnedIds),
     ),
   );

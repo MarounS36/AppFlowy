@@ -1,5 +1,6 @@
-import 'package:appflowy/features/assistant/logic/assistant_service.dart';
 import 'package:appflowy/features/ai_organize/logic/organize_service.dart';
+import 'package:appflowy/features/assistant/logic/assistant_service.dart';
+import 'package:appflowy/features/assistant/presentation/assistant_availability_builder.dart';
 import 'package:appflowy/features/page_access_level/logic/page_access_level_bloc.dart';
 import 'package:appflowy/generated/flowy_svgs.g.dart';
 import 'package:appflowy/generated/locale_keys.g.dart';
@@ -281,39 +282,28 @@ class MobileViewBottomSheetBody extends StatelessWidget {
   Widget _divider() => const MobileQuickActionDivider();
 }
 
-class _AskInkNestItem extends StatefulWidget {
+class _AskInkNestItem extends StatelessWidget {
   const _AskInkNestItem({required this.onAction});
 
   final MobileViewBottomSheetBodyActionCallback onAction;
 
   @override
-  State<_AskInkNestItem> createState() => _AskInkNestItemState();
-}
-
-class _AskInkNestItemState extends State<_AskInkNestItem> {
-  late final Future<bool> _available =
-      AssistantService.isAvailable().catchError((_) => false);
-
-  @override
   Widget build(BuildContext context) {
-    return FutureBuilder<bool>(
-      future: _available,
-      builder: (context, snapshot) {
-        if (snapshot.data != true) return const SizedBox.shrink();
-        return Column(
-          children: [
-            MobileQuickActionButton(
-              text: LocaleKeys.assistant_title.tr(),
-              icon: FlowySvgs.ai_sparks_s,
-              iconSize: const Size.square(18),
-              onTap: () => widget.onAction(
-                MobileViewBottomSheetBodyAction.askInkNest,
-              ),
-            ),
-            const MobileQuickActionDivider(),
-          ],
-        );
-      },
+    return AssistantAvailabilityBuilder(
+      builder: (_) => Column(
+        children: [
+          MobileQuickActionButton(
+            text: LocaleKeys.assistant_title.tr(),
+            icon: FlowySvgs.ai_sparks_s,
+            iconSize: const Size.square(18),
+            onTap: () async {
+              if (!await AssistantService.isAvailable()) return;
+              onAction(MobileViewBottomSheetBodyAction.askInkNest);
+            },
+          ),
+          const MobileQuickActionDivider(),
+        ],
+      ),
     );
   }
 }

@@ -20,6 +20,7 @@ import 'package:appflowy/startup/startup.dart';
 import 'package:appflowy/user/application/user_service.dart';
 import 'package:appflowy_backend/log.dart';
 import 'package:appflowy_result/appflowy_result.dart';
+import 'package:flutter/foundation.dart';
 import 'package:nanoid/nanoid.dart';
 
 /// Highest stage this build can act on. Task 14 → pages, Task 16 → workspace.
@@ -62,6 +63,15 @@ class AssistantService {
   /// Null when the assist URL is empty or the user has no auth token.
   /// Cached per user id.
   static Future<AssistantService?> current() async {
+    final service = await _current();
+    if (service == null) availability.value = false;
+    return service;
+  }
+
+  /// Live "Ask InkNest is available" flag that entry points listen to.
+  static final ValueNotifier<bool> availability = ValueNotifier(false);
+
+  static Future<AssistantService?> _current() async {
     final url = assistUrlFrom(Env.inknestOrganizeUrl);
     if (url.isEmpty) return null;
     final profile =
@@ -87,7 +97,9 @@ class AssistantService {
 
   static Future<bool> isAvailable() async {
     final service = await current();
-    return service != null && (await service.state()).enabled;
+    final ok = service != null && (await service.state()).enabled;
+    availability.value = ok;
+    return ok;
   }
 
   /// Caches the load Future so concurrent first calls share one state.
@@ -97,6 +109,7 @@ class AssistantService {
     final s = await state();
     s.enabled = enabled;
     await _store.save(s);
+    availability.value = enabled;
   }
 
   Future<void> setConsentedStage(AssistStage stage) async {

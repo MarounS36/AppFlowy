@@ -1,8 +1,8 @@
-import 'package:appflowy/features/assistant/presentation/assistant_sheet.dart';
 import 'dart:async';
 
 import 'package:appflowy/core/helpers/url_launcher.dart';
 import 'package:appflowy/features/ai_organize/presentation/organize_sheet.dart';
+import 'package:appflowy/features/assistant/presentation/assistant_sheet.dart';
 import 'package:appflowy/features/page_access_level/logic/page_access_level_bloc.dart';
 import 'package:appflowy/generated/locale_keys.g.dart';
 import 'package:appflowy/mobile/presentation/bottom_sheet/bottom_sheet.dart';
