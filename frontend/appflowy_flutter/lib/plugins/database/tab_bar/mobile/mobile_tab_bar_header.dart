@@ -1,3 +1,7 @@
+import 'package:appflowy/features/assistant/logic/assistant_service.dart';
+import 'package:appflowy/features/assistant/presentation/assistant_sheet.dart';
+import 'package:appflowy/generated/locale_keys.g.dart';
+import 'package:easy_localization/easy_localization.dart';
 import 'package:appflowy/generated/flowy_svgs.g.dart';
 import 'package:appflowy/mobile/presentation/bottom_sheet/show_transition_bottom_sheet.dart';
 import 'package:appflowy/mobile/presentation/database/view/database_view_list.dart';
@@ -40,24 +44,61 @@ class MobileTabBarHeader extends StatelessWidget {
                 return const SizedBox.shrink();
               }
 
-              return MobileDatabaseControls(
-                controller: state
-                    .tabBarControllerByViewId[currentView.viewId]!.controller,
-                features: switch (currentView.layout) {
-                  ViewLayoutPB.Board || ViewLayoutPB.Calendar => [
-                      MobileDatabaseControlFeatures.filter,
-                    ],
-                  ViewLayoutPB.Grid => [
-                      MobileDatabaseControlFeatures.sort,
-                      MobileDatabaseControlFeatures.filter,
-                    ],
-                  _ => [],
-                },
+              return Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  _AskInkNestIconButton(viewId: currentView.viewId),
+                  MobileDatabaseControls(
+                    controller: state
+                        .tabBarControllerByViewId[currentView.viewId]!
+                        .controller,
+                    features: switch (currentView.layout) {
+                      ViewLayoutPB.Board || ViewLayoutPB.Calendar => [
+                          MobileDatabaseControlFeatures.filter,
+                        ],
+                      ViewLayoutPB.Grid => [
+                          MobileDatabaseControlFeatures.sort,
+                          MobileDatabaseControlFeatures.filter,
+                        ],
+                      _ => [],
+                    },
+                  ),
+                ],
               );
             },
           ),
         ],
       ),
+    );
+  }
+}
+
+class _AskInkNestIconButton extends StatefulWidget {
+  const _AskInkNestIconButton({required this.viewId});
+
+  final String viewId;
+
+  @override
+  State<_AskInkNestIconButton> createState() => _AskInkNestIconButtonState();
+}
+
+class _AskInkNestIconButtonState extends State<_AskInkNestIconButton> {
+  late final Future<bool> _available =
+      AssistantService.isAvailable().catchError((_) => false);
+
+  @override
+  Widget build(BuildContext context) {
+    return FutureBuilder<bool>(
+      future: _available,
+      builder: (context, snapshot) {
+        if (snapshot.data != true) return const SizedBox.shrink();
+        return IconButton(
+          tooltip: LocaleKeys.assistant_title.tr(),
+          icon: const FlowySvg(FlowySvgs.ai_sparks_s),
+          onPressed: () =>
+              showAssistantSheet(context, pinnedIds: [widget.viewId]),
+        );
+      },
     );
   }
 }

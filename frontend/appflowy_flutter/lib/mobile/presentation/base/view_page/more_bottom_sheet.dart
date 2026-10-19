@@ -1,3 +1,4 @@
+import 'package:appflowy/features/assistant/presentation/assistant_sheet.dart';
 import 'dart:async';
 
 import 'package:appflowy/core/helpers/url_launcher.dart';
@@ -70,6 +71,12 @@ class MobileViewPageMoreBottomSheet extends StatelessWidget {
     switch (action) {
       case MobileViewBottomSheetBodyAction.aiOrganize:
         await showOrganizeSheet(context, noteId: view.id);
+        if (context.mounted) {
+          context.pop();
+        }
+        break;
+      case MobileViewBottomSheetBodyAction.askInkNest:
+        await showAssistantSheet(context, pinnedIds: [view.id]);
         if (context.mounted) {
           context.pop();
         }

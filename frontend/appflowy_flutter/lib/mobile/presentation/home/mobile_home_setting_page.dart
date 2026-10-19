@@ -1,3 +1,4 @@
+import 'package:appflowy/features/assistant/presentation/assistant_settings_group.dart';
 import 'package:appflowy/env/cloud_env.dart';
 import 'package:appflowy/env/env.dart';
 import 'package:appflowy/features/ai_organize/presentation/ai_organize_settings_group.dart';
@@ -105,6 +106,7 @@ class _MobileHomeSettingPageState extends State<MobileHomeSettingPage> {
                       workspaceId: currentWorkspaceId,
                     ),
                     const AiOrganizeSettingsGroup(),
+                    const AssistantSettingsGroup(),
                   ],
                   const SupportSettingGroup(),
                   const AboutSettingGroup(),
