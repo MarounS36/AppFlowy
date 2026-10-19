@@ -1,0 +1,950 @@
+import 'dart:async';
+
+import 'package:appflowy/core/config/kv.dart';
+import 'package:appflowy/features/ai_organize/data/organize_api.dart';
+import 'package:appflowy/features/ai_organize/data/organize_models.dart';
+import 'package:appflowy/features/assistant/actions/board_actions.dart';
+import 'package:appflowy/features/assistant/actions/calendar_actions.dart';
+import 'package:appflowy/features/assistant/actions/database_actions.dart';
+import 'package:appflowy/features/assistant/actions/page_content_actions.dart';
+import 'package:appflowy/features/assistant/actions/page_workspace_actions.dart';
+import 'package:appflowy/features/assistant/data/assist_api.dart';
+import 'package:appflowy/features/assistant/data/assistant_models.dart';
+import 'package:appflowy/features/assistant/data/assistant_store.dart';
+import 'package:appflowy/features/assistant/gateways/board_gateway.dart';
+import 'package:appflowy/features/assistant/gateways/calendar_gateway.dart';
+import 'package:appflowy/features/assistant/gateways/database_gateway.dart';
+import 'package:appflowy/features/assistant/gateways/page_gateway.dart';
+import 'package:appflowy/features/assistant/logic/action_engine.dart';
+import 'package:appflowy/features/assistant/logic/action_handler.dart';
+import 'package:appflowy/features/assistant/logic/assistant_service.dart';
+import 'package:appflowy_backend/log.dart';
+import 'package:appflowy_backend/protobuf/flowy-database2/protobuf.dart';
+import 'package:appflowy_backend/protobuf/flowy-folder/protobuf.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:mocktail/mocktail.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+
+class _MockCalendar extends Mock implements CalendarGateway {}
+
+class _MockBoards extends Mock implements BoardGateway {}
+
+class _MockPages extends Mock implements PageGateway {}
+
+class _MockDbs extends Mock implements DatabaseGateway {}
+
+class _MockApi extends Mock implements AssistApi {}
+
+/// The next [failSets] writes throw.
+class _FlakyKv extends DartKeyValue {
+  int failSets = 0;
+
+  @override
+  Future<void> set(String key, String value) {
+    if (failSets > 0) {
+      failSets--;
+      throw Exception('disk full');
+    }
+    return super.set(key, value);
+  }
+}
+
+final calls = <String>[];
+
+/// `ref` must be a context id; `destructive` marks the preview; only `title`
+/// is editable; an action whose `n` is in [failing] throws once.
+class _Fake implements ActionHandler {
+  _Fake(this.type, [this.stage = AssistStage.schedule]);
+
+  @override
+  final String type;
+  @override
+  final AssistStage stage;
+  Future<void> Function()? beforeApply;
+  final failing = <int>{};
+
+  @override
+  String? validate(AssistAction a, ValidationScope scope) {
+    final ref = a.fields['ref'];
+    return ref == null || scope.knownIds.contains(ref) ? null : 'unknown';
+  }
+
+  @override
+  ActionPreview describe(AssistAction a, Map<String, String> labels) =>
+      ActionPreview(
+        text: type,
+        destructive: a.fields['destructive'] == true,
+        editable: const ['title'],
+      );
+
+  @override
+  Future<UndoRecord> apply(AssistAction a, ApplyScope scope) async {
+    await beforeApply?.call();
+    final n = a.fields['n'] as int;
+    final title = a.fields['title'];
+    calls.add(title == null ? 'apply $n' : 'apply $n $title');
+    if (failing.remove(n)) throw StateError('boom $n');
+    return UndoRecord(type: type, data: {'n': n});
+  }
+
+  @override
+  Future<UndoOutcome> undo(UndoRecord r) async {
+    calls.add('undo ${r.data['n']}');
+    r.data['undone'] = true;
+    return UndoOutcome.reverted;
+  }
+}
+
+AssistAction act(
+  int n, {
+  String type = 'cal.x',
+  String? ref,
+  String? temp,
+  bool destructive = false,
+}) =>
+    AssistAction(
+      type: type,
+      fields: {
+        'type': type,
+        'n': n,
+        if (ref != null) 'ref': ref,
+        if (temp != null) 'temp_id': temp,
+        if (destructive) 'destructive': true,
+      },
+    );
+
+Proposal proposal(
+  List<AssistAction> actions, {
+  Set<int>? ticked,
+  Map<int, Map<String, dynamic>>? edits,
+}) =>
+    Proposal(
+      id: 'p1',
+      actions: actions,
+      note: '',
+      weekStart: '2026-10-19',
+      labels: const {'b1': 'Move'},
+      ticked: ticked,
+      edits: edits,
+    );
+
+Matcher throwsKind(OrganizeErrorKind kind) => throwsA(
+      isA<OrganizeApiException>().having((e) => e.kind, 'kind', kind),
+    );
+
+void main() {
+  late _MockCalendar calendar;
+  late _MockBoards boards;
+  late _MockPages pages;
+  late _MockDbs dbs;
+  late _MockApi api;
+  late _FlakyKv kv;
+  late _Fake cal;
+  late _Fake page;
+  late List<String> tokens;
+  late List<Map<String, dynamic>> bodies;
+
+  AssistantStore store() => AssistantStore(kv: kv, userId: 'u1');
+
+  AssistantService service([ActionEngine? engine]) => AssistantService(
+        store: store(),
+        api: api,
+        engine: engine ?? ActionEngine([cal, page]),
+        calendar: calendar,
+        boards: boards,
+        pages: pages,
+        databases: dbs,
+        accessToken: () async =>
+            tokens.length > 1 ? tokens.removeAt(0) : tokens.first,
+        now: () => DateTime(2026, 10, 19, 9), // a Monday
+      );
+
+  void reply(List<AssistAction> actions, {String note = 'ok'}) => when(
+        () => api.send(token: any(named: 'token'), body: any(named: 'body')),
+      ).thenAnswer((inv) async {
+        bodies.add(inv.namedArguments[#body] as Map<String, dynamic>);
+        return AssistReply(note: note, actions: actions);
+      });
+
+  Future<AssistantService> consented([
+    AssistStage stage = AssistStage.schedule,
+  ]) async {
+    final s = service();
+    await s.setConsentedStage(stage);
+    return s;
+  }
+
+  Future<void> seed(Proposal p, {List<AppliedProposal>? applied}) =>
+      store().save(
+        AssistantState(
+          consentedStage: AssistStage.schedule,
+          proposal: p,
+          applied: applied,
+        ),
+      );
+
+  ActionEngine realEngine() => ActionEngine([
+        ...calendarHandlers(calendar),
+        ...boardHandlers(boards),
+        ...pageContentHandlers(pages),
+        ...pageWorkspaceHandlers(pages),
+        ...databaseHandlers(dbs),
+      ]);
+
+  setUpAll(() => registerFallbackValue(DateTime(2026)));
+
+  setUp(() {
+    TestWidgetsFlutterBinding.ensureInitialized();
+    SharedPreferences.setMockInitialValues({});
+    Log.shared.disableLog = true;
+    kv = _FlakyKv();
+    calendar = _MockCalendar();
+    boards = _MockBoards();
+    pages = _MockPages();
+    dbs = _MockDbs();
+    api = _MockApi();
+    cal = _Fake('cal.x');
+    page = _Fake('page.x', AssistStage.pages);
+    calls.clear();
+    bodies = [];
+    tokens = ['t1'];
+    when(() => calendar.findMyWeek()).thenAnswer((_) async => 'week');
+    when(() => calendar.isLocked(any())).thenAnswer((_) async => false);
+    when(() => calendar.entries(any(), any(), any())).thenAnswer(
+      (_) async => [
+        CalendarEntry(
+          id: 'e1',
+          title: 'Gym',
+          start: DateTime(2026, 10, 20, 7),
+          end: DateTime(2026, 10, 20, 8),
+          allDay: false,
+        ),
+      ],
+    );
+    when(() => boards.boards()).thenAnswer(
+      (_) async => [
+        (id: 'b1', name: 'Sprint', isLocked: false),
+        (id: 'b2', name: 'Home Reno', isLocked: false),
+        (id: 'b3', name: 'Garden', isLocked: false),
+      ],
+    );
+    when(() => boards.board(any())).thenAnswer((_) async => null);
+    when(() => pages.tree()).thenAnswer(
+      (_) async => const [
+        PageRef(
+          id: 's1',
+          name: 'Home',
+          parentId: 'w',
+          layout: 'space',
+          editable: true,
+        ),
+        PageRef(
+          id: 'b1',
+          name: 'Sprint',
+          parentId: 's1',
+          layout: 'board',
+          editable: true,
+        ),
+        PageRef(
+          id: 'p1',
+          name: 'Trip',
+          parentId: 's1',
+          layout: 'document',
+          editable: true,
+        ),
+      ],
+    );
+    when(() => pages.markdown(any())).thenAnswer((_) async => 'Trip notes');
+    when(() => dbs.databases()).thenAnswer(
+      (_) async => [
+        (
+          id: 'b1',
+          name: 'Sprint',
+          layout: ViewLayoutPB.Board,
+          isLocked: false,
+        ),
+        (id: 'g1', name: 'Books', layout: ViewLayoutPB.Grid, isLocked: false),
+      ],
+    );
+    when(() => dbs.snapshot(any())).thenAnswer(
+      (i) async => DbSnapshot(
+        id: i.positionalArguments[0] as String,
+        name: 'Books',
+        layout: ViewLayoutPB.Grid,
+        fields: const [
+          DbField(
+            id: 'f1',
+            name: 'Title',
+            type: FieldType.RichText,
+            writable: true,
+          ),
+        ],
+        rows: const [
+          (id: 'r1', cells: {'f1': 'Dune'}),
+        ],
+      ),
+    );
+    reply([]);
+  });
+
+  group('send', () {
+    test('send refused when disabled or not consented', () async {
+      final s = service();
+      await expectLater(
+        s.send('hi', mentionIds: []),
+        throwsKind(OrganizeErrorKind.failed),
+      );
+      await s.setConsentedStage(AssistStage.schedule);
+      await s.setEnabled(false);
+      await expectLater(
+        s.send('hi', mentionIds: []),
+        throwsKind(OrganizeErrorKind.failed),
+      );
+      verifyNever(
+        () => api.send(token: any(named: 'token'), body: any(named: 'body')),
+      );
+      expect((await s.state()).thread, isEmpty);
+    });
+
+    test('send posts only allowed action types for the active stage', () async {
+      final s = await consented(AssistStage.workspace);
+      expect(await s.activeStage(), AssistStage.workspace);
+
+      await s.send('plan next week with Sprint', mentionIds: ['b1', 'page9']);
+
+      final body = bodies.single;
+      expect(body['allowed_actions'], ['cal.x', 'page.x']);
+      expect(body['messages'], [
+        {'role': 'user', 'text': 'plan next week with Sprint'},
+      ]);
+      expect(body.containsKey('proposal'), isFalse);
+      final ctx = body['context'] as Map;
+      expect(ctx['week_start'], '2026-10-26');
+      expect((ctx['calendar'] as Map)['id'], 'week');
+      expect(
+        [for (final b in ctx['boards'] as List) (b as Map)['id']],
+        ['b1', 'b2', 'b3'],
+      );
+      verify(() => boards.board('b1')).called(1);
+      verifyNever(() => boards.board('page9'));
+    });
+
+    test('follow-up sends the current proposal as the user sees it', () async {
+      final s = await consented();
+      reply([act(0, ref: 'b1'), act(1)], note: 'Added it');
+      (await s.send('add gym', mentionIds: []))!
+        ..ticked = {0}
+        ..edits = {
+          0: {'title': 'Gym', 'n': 99},
+        };
+      await s.send('also Friday', mentionIds: []);
+
+      final body = bodies.last;
+      expect(
+        body['proposal'],
+        [
+          {'type': 'cal.x', 'n': 0, 'ref': 'b1', 'title': 'Gym'},
+        ],
+        reason: 'ticked actions only, with edits to editable keys',
+      );
+      expect(body['messages'], [
+        {'role': 'user', 'text': 'add gym'},
+        {'role': 'assistant', 'text': 'Added it'},
+        {'role': 'user', 'text': 'also Friday'},
+      ]);
+    });
+
+    test('real handlers offer board and calendar actions at stage schedule',
+        () async {
+      final s = service(realEngine());
+      await s.setConsentedStage(AssistStage.schedule);
+      await s.send('hi', mentionIds: []);
+      expect(
+        bodies.single['allowed_actions'],
+        containsAll(['board.create', 'calendar.add']),
+      );
+    });
+
+    test('page_texts only for mentioned pages, only when consented to pages',
+        () async {
+      final s = await consented();
+      await s.send('notes for Trip', mentionIds: ['p1']);
+      final first = bodies.last['context'] as Map;
+      expect(first.containsKey('pages'), isFalse);
+      expect(first.containsKey('page_texts'), isFalse);
+      verifyNever(() => pages.tree());
+      verifyNever(() => pages.markdown(any()));
+
+      await s.setConsentedStage(AssistStage.pages);
+      await s.send('notes for Trip', mentionIds: ['b1', 'p1']);
+      final ctx = bodies.last['context'] as Map;
+      expect(
+        [for (final p in ctx['pages'] as List) (p as Map)['id']],
+        ['s1', 'b1', 'p1'],
+      );
+      expect(ctx['page_texts'], [
+        {'id': 'p1', 'markdown': 'Trip notes'},
+      ]);
+
+      await s.send('anything', mentionIds: []);
+      expect((bodies.last['context'] as Map)['page_texts'], isEmpty);
+      verify(() => pages.markdown('p1')).called(1);
+    });
+
+    test('page actions pass client validation only at stage pages', () async {
+      final append = AssistAction(
+        type: 'page.append',
+        fields: {'type': 'page.append', 'page_id': 'p1', 'content': 'Hi'},
+      );
+      final s = service(realEngine());
+      await s.setConsentedStage(AssistStage.schedule);
+      reply([append]);
+      expect(await s.send('add to Trip', mentionIds: ['p1']), isNull);
+      expect(bodies.last['allowed_actions'], isNot(contains('page.append')));
+
+      await s.setConsentedStage(AssistStage.pages);
+      final p = await s.send('add to Trip', mentionIds: ['p1']);
+      expect(
+        bodies.last['allowed_actions'],
+        containsAll(['page.create', 'page.append', 'board.create']),
+      );
+      expect(p!.actions.single.type, 'page.append');
+      expect(p.labels['p1'], 'Trip');
+    });
+
+    test('databases only for mentioned ones, only when consented to stage 3',
+        () async {
+      final s = await consented(AssistStage.pages);
+      await s.send('add Emma to Books', mentionIds: ['g1']);
+      expect((bodies.last['context'] as Map).containsKey('databases'), isFalse);
+      verifyNever(() => dbs.snapshot(any()));
+      verifyNever(() => dbs.databases());
+
+      await s.setConsentedStage(AssistStage.workspace);
+      await s.send('add Emma to Books', mentionIds: ['g1', 'p1']);
+      final ctx = bodies.last['context'] as Map;
+      expect([
+        for (final d in ctx['databases'] as List) (d as Map)['id'],
+      ], [
+        'g1',
+      ]);
+      verify(() => dbs.snapshot('g1')).called(1);
+
+      await s.send('anything', mentionIds: []);
+      expect((bodies.last['context'] as Map)['databases'], isEmpty);
+    });
+
+    test('stage 3 offers page and database actions and checks them', () async {
+      AssistAction update(String field) => AssistAction(
+            type: 'row.update',
+            fields: {
+              'type': 'row.update',
+              'database_id': 'g1',
+              'row_id': 'r1',
+              'cells': {field: 'Dune Messiah'},
+            },
+          );
+      final s = service(realEngine());
+      await s.setConsentedStage(AssistStage.pages);
+      reply([update('f1')]);
+      expect(await s.send('rename in Books', mentionIds: ['g1']), isNull);
+      expect(bodies.last['allowed_actions'], isNot(contains('row.update')));
+
+      await s.setConsentedStage(AssistStage.workspace);
+      reply([update('f1'), update('zz')]);
+      final p = await s.send('rename in Books', mentionIds: ['g1']);
+      expect(
+        bodies.last['allowed_actions'],
+        containsAll(
+          ['page.rename', 'page.delete', 'database.create', 'row.update'],
+        ),
+      );
+      expect(p!.actions, hasLength(1));
+      expect(p.labels['r1'], 'Dune');
+      expect(
+        p.labels.keys.toSet(),
+        {'g1', 'g1#primary', 'r1', 'r1#f1', 'f1'},
+        reason: 'only labels the kept actions use',
+      );
+      final preview = s.describe(p.actions.single, p.labels);
+      expect(preview.text, 'Change row: Dune');
+      expect([
+        preview.before,
+        preview.after,
+      ], [
+        'Title: Dune',
+        'Title: Dune Messiah',
+      ]);
+    });
+
+    test('a cell edit goes into cells: sent back and applied', () async {
+      when(() => dbs.snapshot('g1', rowCap: any(named: 'rowCap'))).thenAnswer(
+        (_) async => const DbSnapshot(
+          id: 'g1',
+          name: 'Books',
+          layout: ViewLayoutPB.Grid,
+          fields: [
+            DbField(
+              id: 'f1',
+              name: 'Title',
+              type: FieldType.RichText,
+              writable: true,
+            ),
+          ],
+          rows: [],
+        ),
+      );
+      when(() => dbs.row('g1', 'r1')).thenAnswer((_) async => {'f1': 'Dune'});
+      when(() => dbs.updateRow('g1', 'r1', any())).thenAnswer((_) async {});
+      final update = AssistAction(
+        type: 'row.update',
+        fields: {
+          'type': 'row.update',
+          'database_id': 'g1',
+          'row_id': 'r1',
+          'cells': {'f1': 'Dune II'},
+        },
+      );
+      await seed(
+        proposal(
+          [update],
+          edits: {
+            0: {'f1': 'Dune III'},
+          },
+        ),
+      );
+      final s = service(realEngine());
+      await s.setConsentedStage(AssistStage.workspace);
+      await s.send('ok', mentionIds: []);
+      expect(bodies.last['proposal'], [
+        {
+          'type': 'row.update',
+          'database_id': 'g1',
+          'row_id': 'r1',
+          'cells': {'f1': 'Dune III'},
+        },
+      ]);
+
+      await seed(
+        proposal(
+          [update],
+          edits: {
+            0: {'f1': 'Dune III'},
+          },
+        ),
+      );
+      final applied = await service(realEngine()).apply();
+      expect(applied.status, AppliedStatus.applied);
+      verify(() => dbs.updateRow('g1', 'r1', {'f1': 'Dune III'})).called(1);
+      expect(update.fields['cells'], {'f1': 'Dune II'}, reason: 'a copy');
+    });
+
+    test('a follow-up details the boards the open proposal touches', () async {
+      when(() => boards.board('b1')).thenAnswer(
+        (_) async => const BoardSnapshot(
+          id: 'b1',
+          name: 'Sprint',
+          columns: [BoardColumn(id: 'todo', name: 'To do', isDefault: false)],
+          cards: [BoardCard(id: 'c1', title: 'Spec', columnId: 'todo')],
+          editable: true,
+        ),
+      );
+      AssistAction update(String title) => AssistAction(
+            type: 'board.card.update',
+            fields: {
+              'type': 'board.card.update',
+              'board_id': 'b1',
+              'card_id': 'c1',
+              'title': title,
+            },
+          );
+      await seed(proposal([update('Write spec')]));
+      reply([update('Write the spec')]);
+
+      final p = await service(realEngine()).send(
+        'make it longer',
+        mentionIds: [],
+      );
+
+      verify(() => boards.board('b1')).called(1);
+      expect(p!.actions.single.fields['title'], 'Write the spec');
+    });
+
+    test('a reply that arrives after the proposal was applied is dropped',
+        () async {
+      await seed(proposal([act(0)]));
+      final s = service();
+      final started = Completer<void>();
+      final gate = Completer<AssistReply>();
+      when(
+        () => api.send(token: any(named: 'token'), body: any(named: 'body')),
+      ).thenAnswer((_) {
+        started.complete();
+        return gate.future;
+      });
+
+      final sending = s.send('also Friday', mentionIds: []);
+      await started.future;
+      await s.apply();
+      gate.complete(AssistReply(note: 'Revised', actions: [act(1)]));
+
+      expect(await sending, isNull);
+      final saved = await store().load();
+      expect(saved.proposal, isNull);
+      expect(saved.thread.last.text, 'Revised');
+      expect(calls, ['apply 0']);
+    });
+
+    test('sends only the last 10 turns', () async {
+      await store().save(
+        AssistantState(
+          consentedStage: AssistStage.schedule,
+          thread: [
+            for (var i = 0; i < 10; i++)
+              ChatTurn(role: i.isEven ? 'user' : 'assistant', text: 't$i'),
+          ],
+        ),
+      );
+      await service().send('new', mentionIds: []);
+
+      final messages = bodies.single['messages'] as List;
+      expect(messages, hasLength(10));
+      expect(messages.first, {'role': 'assistant', 'text': 't1'});
+      expect(messages.last, {'role': 'user', 'text': 'new'});
+    });
+
+    test('client re-validation drops actions the server let through', () async {
+      final s = await consented();
+      reply([
+        act(0, ref: 'b1'),
+        act(1, ref: 'nope'),
+        act(2, type: 'page.x'),
+        act(3, type: 'zzz'),
+        act(4, ref: 'e1', destructive: true),
+      ]);
+
+      final p = (await s.send('move it', mentionIds: []))!;
+
+      expect([for (final a in p.actions) a.fields['n']], [0, 4]);
+      expect(p.ticked, {0}, reason: 'destructive actions start unticked');
+      expect(p.weekStart, '2026-10-19');
+      expect(p.labels['b1'], 'Sprint');
+      expect(p.labels['e1'], isNotNull);
+      final saved = await store().load();
+      expect(saved.proposal!.id, p.id);
+      expect(saved.thread.map((t) => t.role), ['user', 'assistant']);
+    });
+
+    test('a follow-up with no valid action keeps the proposal and the note',
+        () async {
+      final s = await consented();
+      reply([act(0, ref: 'b1')]);
+      final open = (await s.send('a', mentionIds: []))!;
+      reply([act(1, ref: 'nope')], note: 'Which board?');
+
+      expect(await s.send('b', mentionIds: []), isNull);
+
+      final saved = await store().load();
+      expect(saved.proposal!.id, open.id);
+      expect(saved.thread.last.role, 'assistant');
+      expect(saved.thread.last.text, 'Which board?');
+    });
+
+    test('a first reply with no valid action opens no proposal', () async {
+      final s = await consented();
+      reply([act(1, ref: 'nope')], note: 'Nothing to change');
+      expect(await s.send('b', mentionIds: []), isNull);
+      expect((await store().load()).proposal, isNull);
+    });
+
+    test("a follow-up keeps the open proposal's week unless it names one",
+        () async {
+      Proposal open(String week) => Proposal(
+            id: 'p-$week',
+            actions: [act(0)],
+            note: '',
+            weekStart: week,
+            labels: const {},
+          );
+      String sentWeek() =>
+          (bodies.last['context'] as Map)['week_start'] as String;
+      // Monday 2026-10-19: a message naming no week means this week.
+      await seed(open('2026-10-26'));
+      final s = service();
+      reply([act(1)]);
+
+      await s.send('move gym to Thursday', mentionIds: []);
+      expect(sentWeek(), '2026-10-26');
+
+      (await s.state()).proposal = open('2026-10-26');
+      await s.send('this week instead', mentionIds: []);
+      expect(sentWeek(), '2026-10-19');
+
+      (await s.state()).proposal = null;
+      await s.send('move gym to Thursday', mentionIds: []);
+      expect(sentWeek(), '2026-10-19');
+    });
+
+    test('a failed send leaves the thread unchanged', () async {
+      final s = await consented();
+      when(
+        () => api.send(token: any(named: 'token'), body: any(named: 'body')),
+      ).thenThrow(const OrganizeApiException(OrganizeErrorKind.userLimit));
+      await expectLater(
+        s.send('hi', mentionIds: []),
+        throwsKind(OrganizeErrorKind.userLimit),
+      );
+
+      when(() => calendar.findMyWeek()).thenThrow(Exception('backend'));
+      await expectLater(
+        s.send('hi', mentionIds: []),
+        throwsKind(OrganizeErrorKind.failed),
+      );
+      expect((await s.state()).thread, isEmpty);
+    });
+
+    test('on 401 re-reads the token and retries once', () async {
+      final s = await consented();
+      tokens = ['t1', 't2', 't3', 't4'];
+      final seen = <String>[];
+      var fail = 1;
+      when(
+        () => api.send(token: any(named: 'token'), body: any(named: 'body')),
+      ).thenAnswer((inv) async {
+        seen.add(inv.namedArguments[#token] as String);
+        if (fail-- > 0) {
+          throw const OrganizeApiException(OrganizeErrorKind.unauthorized);
+        }
+        return const AssistReply(note: 'ok', actions: []);
+      });
+
+      await s.send('hi', mentionIds: []);
+      expect(seen, ['t1', 't2']);
+
+      fail = 2;
+      await expectLater(
+        s.send('hi', mentionIds: []),
+        throwsKind(OrganizeErrorKind.unauthorized),
+      );
+      expect(seen, ['t1', 't2', 't3', 't4']);
+    });
+  });
+
+  test('mentionsFor puts pinned items first, then mentions, without dupes',
+      () async {
+    final m = await service().mentionsFor(
+      'weed the garden, then sprint',
+      pinnedIds: ['b2', 'b3', 'gone'],
+    );
+    expect([for (final e in m) e.id], ['b2', 'b3', 'b1']);
+    expect(m.every((e) => e.kind == 'board'), isTrue);
+  });
+
+  test('mentionsFor includes pages, not spaces, boards once', () async {
+    final m = await service().mentionsFor('home: sprint and trip');
+    final got = [for (final e in m) (e.id, e.kind)];
+    expect(got, [('b1', 'board'), ('p1', 'page')]);
+  });
+
+  test('mentionsFor adds databases, boards once', () async {
+    final m = await service().mentionsFor('sprint and books');
+    expect([
+      for (final e in m) (e.id, e.kind),
+    ], [
+      ('b1', 'board'),
+      ('g1', 'database'),
+    ]);
+  });
+
+  test('describe passes through to the engine', () {
+    expect(service().describe(act(0), {}).text, 'cal.x');
+  });
+
+  test('discard closes the proposal durably and keeps the thread', () async {
+    await seed(proposal([act(0)]));
+    final s = service();
+    (await s.state()).thread.add(ChatTurn(role: 'user', text: 'hi'));
+    await s.discard();
+    final saved = await store().load();
+    expect(saved.proposal, isNull);
+    expect(saved.thread, hasLength(1));
+  });
+
+  group('apply', () {
+    test('apply persists after each action', () async {
+      await seed(
+        proposal(
+          [act(0), act(1), act(2)],
+          ticked: {2, 0},
+          edits: {
+            2: {'title': 'Edited', 'n': 99},
+          },
+        ),
+      );
+      final s = service();
+      final seen = <int>[];
+      cal.beforeApply = () async {
+        final saved = await store().load();
+        expect(saved.proposal, isNull);
+        seen.add(saved.applied.single.records.length);
+      };
+
+      final p = await s.apply();
+      expect(p.labels, {'b1': 'Move'});
+
+      expect(
+        calls,
+        ['apply 0', 'apply 2 Edited'],
+        reason: 'n is not editable, so its edit is ignored',
+      );
+      expect(seen, [0, 1], reason: 'saved before the first and after each');
+      expect(p.status, AppliedStatus.applied);
+      final saved = (await store().load()).applied.single;
+      expect(saved.status, AppliedStatus.applied);
+      expect(saved.records, hasLength(2));
+      expect([for (final a in saved.actions) a.fields['n']], [0, 2]);
+    });
+
+    test('apply twice concurrently applies once', () async {
+      await seed(proposal([act(0), act(1)]));
+      final gate = Completer<void>();
+      cal.beforeApply = () => gate.future;
+      final s = service();
+
+      final first = s.apply();
+      await expectLater(s.apply(), throwsStateError);
+      final busy = throwsA(
+        isA<StateError>().having((e) => e.message, 'message', contains('busy')),
+      );
+      await expectLater(s.undo('p1'), busy);
+      await expectLater(s.retry('p1'), busy);
+      gate.complete();
+      await first;
+
+      expect(calls, ['apply 0', 'apply 1']);
+      expect((await s.state()).applied, hasLength(1));
+      await expectLater(s.apply(), throwsStateError);
+    });
+
+    test('retry resumes partial', () async {
+      await seed(proposal([act(0), act(1), act(2)]));
+      cal.failing.add(1);
+      final s = service();
+
+      expect((await s.apply()).status, AppliedStatus.partial);
+      expect(calls, ['apply 0', 'apply 1']);
+
+      expect((await s.retry('p1')).status, AppliedStatus.applied);
+      expect(calls, ['apply 0', 'apply 1', 'apply 1', 'apply 2']);
+      expect(
+        (await store().load()).applied.single.status,
+        AppliedStatus.applied,
+      );
+
+      await s.retry('p1');
+      expect(calls, hasLength(4), reason: 'only partial ones are retried');
+    });
+
+    test('apply refuses when nothing is ticked', () async {
+      await seed(proposal([act(0)], ticked: <int>{}));
+      final s = service();
+
+      await expectLater(s.apply(), throwsStateError);
+
+      final saved = await store().load();
+      expect(saved.proposal, isNotNull);
+      expect(saved.applied, isEmpty);
+      expect(calls, isEmpty);
+    });
+
+    test('apply refuses a temp id declared only by an unticked action',
+        () async {
+      await seed(
+        proposal([act(0, temp: 'new:1'), act(1, ref: 'new:1')], ticked: {1}),
+      );
+      final s = service();
+
+      await expectLater(s.apply(), throwsStateError);
+      expect((await s.state()).applied, isEmpty);
+      expect((await store().load()).proposal, isNotNull);
+
+      (await s.state()).proposal!.ticked = {0, 1};
+      await s.apply();
+      expect(calls, ['apply 0', 'apply 1']);
+    });
+
+    test('a title that starts with "new:" is not a temp id', () async {
+      final titled = AssistAction(
+        type: 'cal.x',
+        fields: {'type': 'cal.x', 'n': 0, 'title': 'new: logo ideas'},
+      );
+      await seed(proposal([titled]));
+      await service().apply();
+      expect(calls, ['apply 0 new: logo ideas']);
+    });
+
+    test('a temp id used as a cells key counts as a reference', () async {
+      final cellsRef = AssistAction(
+        type: 'cal.x',
+        fields: {
+          'type': 'cal.x',
+          'n': 1,
+          'cells': {'new:1': 'x'},
+        },
+      );
+      await seed(proposal([act(0, temp: 'new:1'), cellsRef], ticked: {1}));
+      await expectLater(service().apply(), throwsStateError);
+      expect(calls, isEmpty);
+    });
+
+    test('retry resumes a proposal left applying by a failed save', () async {
+      await seed(proposal([act(0)]));
+      final s = service();
+      kv.failSets = 1;
+
+      await expectLater(s.apply(), throwsException);
+      expect((await s.state()).applied.single.status, AppliedStatus.applying);
+      expect(calls, isEmpty);
+
+      expect((await s.retry('p1')).status, AppliedStatus.applied);
+      expect(calls, ['apply 0']);
+    });
+
+    test('apply keeps the newest 20 applied in memory', () async {
+      await seed(
+        proposal([act(0)]),
+        applied: [
+          for (var i = 0; i < 20; i++)
+            AppliedProposal(
+              id: 'old$i',
+              appliedAt: DateTime.utc(2026),
+              actions: [],
+              status: AppliedStatus.applied,
+            ),
+        ],
+      );
+      final s = service();
+
+      await s.apply();
+
+      final applied = (await s.state()).applied;
+      expect(applied, hasLength(20));
+      expect(applied.first.id, 'old1');
+      expect(applied.last.id, 'p1');
+    });
+
+    test('undo marks undone and persists', () async {
+      await seed(proposal([act(0), act(1)]));
+      final s = service();
+      await s.apply();
+
+      final report = await s.undo('p1');
+
+      expect(report.reverted, 2);
+      expect(calls, ['apply 0', 'apply 1', 'undo 1', 'undo 0']);
+      final saved = (await store().load()).applied.single;
+      expect(saved.status, AppliedStatus.undone);
+      expect(saved.records.every((r) => r.data['undone'] == true), isTrue);
+    });
+  });
+}

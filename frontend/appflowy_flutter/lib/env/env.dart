@@ -51,4 +51,12 @@ abstract class Env {
     defaultValue: ShareConstants.defaultBaseWebDomain,
   )
   static const String baseWebDomain = _Env.baseWebDomain;
+
+  /// InkNest: full URL of the Supabase `organize` function. Empty hides AI Organize.
+  @EnviedField(
+    obfuscate: false,
+    varName: 'INKNEST_ORGANIZE_URL',
+    defaultValue: '',
+  )
+  static const String inknestOrganizeUrl = _Env.inknestOrganizeUrl;
 }

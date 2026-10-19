@@ -1,5 +1,6 @@
 library;
 
+import 'package:appflowy/features/assistant/presentation/ask_inknest_button.dart';
 import 'package:appflowy/features/page_access_level/logic/page_access_level_bloc.dart';
 import 'package:appflowy/generated/flowy_svgs.g.dart';
 import 'package:appflowy/generated/locale_keys.g.dart';
@@ -210,6 +211,7 @@ class DocumentPluginWidgetBuilder extends PluginWidgetBuilder
                   const HSpace(16),
                 ]
               : [const HSpace(8)],
+          AskInkNestButton(pinnedIds: [view.id]),
           ShareButton(
             key: ValueKey('share_button_${view.id}'),
             view: view,

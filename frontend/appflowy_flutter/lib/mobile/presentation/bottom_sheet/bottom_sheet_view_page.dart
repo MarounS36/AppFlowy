@@ -1,3 +1,6 @@
+import 'package:appflowy/features/ai_organize/logic/organize_service.dart';
+import 'package:appflowy/features/assistant/logic/assistant_service.dart';
+import 'package:appflowy/features/assistant/presentation/assistant_availability_builder.dart';
 import 'package:appflowy/features/page_access_level/logic/page_access_level_bloc.dart';
 import 'package:appflowy/generated/flowy_svgs.g.dart';
 import 'package:appflowy/generated/locale_keys.g.dart';
@@ -17,6 +20,8 @@ enum MobileViewBottomSheetBodyAction {
   undo,
   redo,
   rename,
+  aiOrganize,
+  askInkNest,
   duplicate,
   delete,
   addToFavorites,
@@ -34,6 +39,7 @@ enum MobileViewBottomSheetBodyAction {
     undo,
     redo,
     rename,
+    aiOrganize,
     delete,
   ];
 }
@@ -127,6 +133,27 @@ class MobileViewBottomSheetBody extends StatelessWidget {
           ),
         ),
         _divider(),
+        if (view.layout == ViewLayoutPB.Document && isEditable)
+          FutureBuilder<bool>(
+            future: OrganizeService.isAvailable(),
+            builder: (context, snapshot) {
+              if (snapshot.data != true) return const SizedBox.shrink();
+              return Column(
+                children: [
+                  MobileQuickActionButton(
+                    text: LocaleKeys.aiOrganize_action.tr(),
+                    icon: FlowySvgs.ai_sparks_s,
+                    iconSize: const Size.square(18),
+                    onTap: () => onAction(
+                      MobileViewBottomSheetBodyAction.aiOrganize,
+                    ),
+                  ),
+                  _divider(),
+                ],
+              );
+            },
+          ),
+        _AskInkNestItem(onAction: onAction),
         MobileQuickActionButton(
           text: isFavorite
               ? LocaleKeys.button_removeFromFavorites.tr()
@@ -253,6 +280,32 @@ class MobileViewBottomSheetBody extends StatelessWidget {
   }
 
   Widget _divider() => const MobileQuickActionDivider();
+}
+
+class _AskInkNestItem extends StatelessWidget {
+  const _AskInkNestItem({required this.onAction});
+
+  final MobileViewBottomSheetBodyActionCallback onAction;
+
+  @override
+  Widget build(BuildContext context) {
+    return AssistantAvailabilityBuilder(
+      builder: (_) => Column(
+        children: [
+          MobileQuickActionButton(
+            text: LocaleKeys.assistant_title.tr(),
+            icon: FlowySvgs.ai_sparks_s,
+            iconSize: const Size.square(18),
+            onTap: () async {
+              if (!await AssistantService.isAvailable()) return;
+              onAction(MobileViewBottomSheetBodyAction.askInkNest);
+            },
+          ),
+          const MobileQuickActionDivider(),
+        ],
+      ),
+    );
+  }
 }
 
 class _LockPageRightIconBuilder extends StatelessWidget {

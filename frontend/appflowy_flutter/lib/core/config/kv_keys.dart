@@ -125,4 +125,12 @@ class KVKeys {
   /// The value is a boolean string
   static const String hasClickedUpgradeToProButton =
       'hasClickedUpgradeToProButton';
+
+  /// InkNest AI Organize state, suffixed with '.`user id`'.
+  /// The value is a json string of OrganizeState.
+  static const String aiOrganize = 'inknest.aiOrganize';
+
+  /// InkNest Assistant state, suffixed with '.`user id`'.
+  /// The value is a json string of AssistantState.
+  static const String assistant = 'inknest.assistant';
 }

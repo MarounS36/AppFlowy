@@ -1,0 +1,13 @@
+# Supabase
+.branches
+.temp
+
+# dotenvx
+.env.keys
+.env.local
+.env.*.local
+
+# Secrets (NaraRouter key etc.): never commit
+.env
+.env.*
+functions/.env

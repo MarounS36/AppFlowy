@@ -1,5 +1,7 @@
 import 'package:appflowy/env/cloud_env.dart';
 import 'package:appflowy/env/env.dart';
+import 'package:appflowy/features/ai_organize/presentation/ai_organize_settings_group.dart';
+import 'package:appflowy/features/assistant/presentation/assistant_settings_group.dart';
 import 'package:appflowy/features/workspace/data/repositories/rust_workspace_repository_impl.dart';
 import 'package:appflowy/features/workspace/logic/workspace_bloc.dart';
 import 'package:appflowy/generated/locale_keys.g.dart';
@@ -97,12 +99,15 @@ class _MobileHomeSettingPageState extends State<MobileHomeSettingPage> {
                   const AppearanceSettingGroup(),
                   const LanguageSettingGroup(),
                   if (Env.enableCustomCloud) const CloudSettingGroup(),
-                  if (isAuthEnabled)
+                  if (isAuthEnabled) ...[
                     AiSettingsGroup(
                       key: ValueKey(currentWorkspaceId),
                       userProfile: userProfile,
                       workspaceId: currentWorkspaceId,
                     ),
+                    const AiOrganizeSettingsGroup(),
+                    const AssistantSettingsGroup(),
+                  ],
                   const SupportSettingGroup(),
                   const AboutSettingGroup(),
                   UserSessionSettingGroup(
