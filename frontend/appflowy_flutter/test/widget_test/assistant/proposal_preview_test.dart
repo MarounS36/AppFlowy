@@ -89,6 +89,37 @@ void main() {
     });
   });
 
+  testWidgets('a content box is multi-line and keeps newlines', (tester) async {
+    Map<int, Map<String, dynamic>>? got;
+    await tester.pumpWidget(
+      WidgetTestWrapper(
+        child: ProposalPreview(
+          proposal: Proposal(
+            id: 'p3',
+            actions: [
+              AssistAction(type: 'page.append', fields: {'content': 'Hi'}),
+            ],
+            note: '',
+            weekStart: '2026-10-19',
+            labels: const {},
+          ),
+          describe: (_) =>
+              const ActionPreview(text: 'x', editable: ['content']),
+          onApply: (_, e) => got = e,
+        ),
+      ),
+    );
+    final field = tester.widget<TextField>(find.byType(TextField));
+    expect(field.maxLines, isNull);
+    expect(field.minLines, 3);
+    expect(field.keyboardType, TextInputType.multiline);
+    await tester.enterText(find.byType(TextField), '# Notes\n- one\n- two');
+    await tester.tap(find.text('assistant.applySelected'));
+    expect(got, {
+      0: {'content': '# Notes\n- one\n- two'},
+    });
+  });
+
   testWidgets('a cell box starts with its value and is named for its field',
       (tester) async {
     await tester.pumpWidget(

@@ -78,6 +78,11 @@ class _ProposalPreviewState extends State<ProposalPreview> {
                 for (final key in p.editable)
                   TextField(
                     controller: _controller(i, key),
+                    // Page markdown keeps its lines.
+                    minLines: key == 'content' ? 3 : null,
+                    maxLines: key == 'content' ? null : 1,
+                    keyboardType:
+                        key == 'content' ? TextInputType.multiline : null,
                     decoration: InputDecoration(
                       isDense: true,
                       // A cell's box is named after its field.

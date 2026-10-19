@@ -202,9 +202,18 @@ class _AssistantViewState extends State<AssistantView> {
         if (!mounted) return;
         showToastNotification(
           message: LocaleKeys.assistant_undone.tr(
-            args: ['${r.reverted}', '${r.skippedChanged + r.skippedGone}'],
+            args: ['${r.reverted}', '${r.skippedChanged}', '${r.skippedGone}'],
           ),
         );
+      });
+
+  /// Clears the thread and open proposal; Recent (and its Undo) stays.
+  Future<void> _newConversation() => _run(() async {
+        await _s.clearConversation();
+        _input.clear();
+        _removed.clear();
+        _error = null;
+        unawaited(_updateChips());
       });
 
   Future<void> _retry(String id) => _run(() async {
@@ -246,6 +255,14 @@ class _AssistantViewState extends State<AssistantView> {
                   child: Text(LocaleKeys.assistant_discard.tr()),
                 ),
               ],
+              if (s != null && (s.thread.isNotEmpty || proposal != null))
+                Align(
+                  alignment: Alignment.centerLeft,
+                  child: TextButton(
+                    onPressed: _working ? null : _newConversation,
+                    child: Text(LocaleKeys.assistant_newConversation.tr()),
+                  ),
+                ),
               if (s != null && s.applied.isNotEmpty) ...[
                 const Divider(),
                 Text(LocaleKeys.assistant_recent.tr()),

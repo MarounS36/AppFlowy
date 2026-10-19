@@ -300,6 +300,40 @@ void main() {
     expect(find.text('Move'), findsOneWidget);
   });
 
+  testWidgets('New conversation clears the thread, proposal and input',
+      (tester) async {
+    final s = AssistantState(
+      consentedStage: AssistStage.schedule,
+      thread: [ChatTurn(role: 'user', text: 'plan my week')],
+      proposal: openProposal(),
+    );
+    when(() => service.state()).thenAnswer((_) async => s);
+    when(() => service.describe(any(), any()))
+        .thenReturn(const ActionPreview(text: 'x'));
+    when(() => service.clearConversation()).thenAnswer((_) async {
+      s
+        ..thread.clear()
+        ..proposal = null;
+    });
+    await tester.pumpWidget(themed(AssistantView(service: service)));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byType(TextField).last, 'draft');
+    await tester.pump(const Duration(seconds: 1));
+    expect(find.text('plan my week'), findsOneWidget);
+
+    await tester.tap(find.text('assistant.newConversation'));
+    await tester.pumpAndSettle();
+
+    verify(() => service.clearConversation()).called(1);
+    expect(find.text('plan my week'), findsNothing);
+    expect(find.text('assistant.applySelected'), findsNothing);
+    expect(find.text('assistant.newConversation'), findsNothing);
+    expect(
+      tester.widget<TextField>(find.byType(TextField)).controller!.text,
+      isEmpty,
+    );
+  });
+
   testWidgets('New page chip fills the input', (tester) async {
     consented();
     await tester.pumpWidget(themed(AssistantView(service: service)));
