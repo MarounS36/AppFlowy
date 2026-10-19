@@ -195,7 +195,7 @@ Future<ContextPart> pageContext(
         if (!p.editable) p.id,
     },
     items: {
-      for (final p in tree) p.id: {'layout': p.layout},
+      for (final p in tree) p.id: {'layout': p.layout, 'parent_id': p.parentId},
     },
   );
 }

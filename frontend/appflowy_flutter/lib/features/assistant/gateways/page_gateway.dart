@@ -16,6 +16,7 @@ class PageRef {
     required this.parentId,
     required this.layout,
     required this.editable,
+    this.isFavorite = false,
   });
 
   /// [layout]: space | document | grid | board | calendar | chat.
@@ -23,6 +24,8 @@ class PageRef {
 
   /// False when locked.
   final bool editable;
+
+  final bool isFavorite;
 }
 
 /// Thin wrapper over the folder/document services; not unit-tested. Every
@@ -54,6 +57,7 @@ class PageGateway {
                 _ => 'other',
               },
         editable: !v.isLocked,
+        isFavorite: v.isFavorite,
       );
 
   /// The page's text as markdown, cut to [cap] chars; null if unreadable.
@@ -136,6 +140,50 @@ class PageGateway {
             .timeout(const Duration(seconds: 10));
     return s.editorState ??
         (throw StateError("Couldn't open page $pageId: ${s.error}"));
+  }
+
+  Future<void> rename(String pageId, String name) async =>
+      (await ViewBackendService.updateView(viewId: pageId, name: name))
+          .getOrThrow();
+
+  /// Under [parentId], after [prevId] (null = first).
+  Future<void> move(String pageId, String parentId, String? prevId) async =>
+      (await ViewBackendService.moveViewV2(
+        viewId: pageId,
+        newParentId: parentId,
+        prevViewId: prevId,
+      ))
+          .getOrThrow();
+
+  /// The sibling right before the page, null if first or missing.
+  Future<String?> prevSiblingId(String pageId) async {
+    final v = (await ViewBackendService.getView(pageId)).toNullable();
+    if (v == null) return null;
+    final sibs =
+        (await ViewBackendService.getChildViews(viewId: v.parentViewId))
+            .getOrThrow();
+    final i = sibs.indexWhere((s) => s.id == pageId);
+    return i > 0 ? sibs[i - 1].id : null;
+  }
+
+  /// With its children; returns the copy's id.
+  Future<String> duplicate(String pageId) async {
+    final v = (await ViewBackendService.getView(pageId)).getOrThrow();
+    final copy = (await ViewBackendService.duplicate(
+      view: v,
+      openAfterDuplicate: false,
+      includeChildren: true,
+      syncAfterDuplicate: true,
+    ))
+        .getOrThrow();
+    return copy.id;
+  }
+
+  /// The backend only toggles, so write only when different.
+  Future<void> setFavorite(String pageId, bool on) async {
+    final v = (await ViewBackendService.getView(pageId)).getOrThrow();
+    if (v.isFavorite == on) return;
+    (await ViewBackendService.favorite(viewId: pageId)).getOrThrow();
   }
 
   /// To Trash.

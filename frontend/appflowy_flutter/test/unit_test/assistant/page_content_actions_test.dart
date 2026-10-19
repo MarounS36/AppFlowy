@@ -302,7 +302,7 @@ void main() {
     expect(p.readOnlyIds, {'p2'});
     expect(p.labels['p1'], 'Trip');
     expect(p.labels['g1'], 'Untitled');
-    expect(p.items['s1'], {'layout': 'space'});
-    expect(p.items['g1'], {'layout': 'grid'});
+    expect(p.items['s1'], {'layout': 'space', 'parent_id': 's1'});
+    expect(p.items['g1'], {'layout': 'grid', 'parent_id': 's1'});
   });
 }
