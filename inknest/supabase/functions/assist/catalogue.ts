@@ -13,6 +13,7 @@ const FIELD_TYPES = [
   "checkbox",
 ];
 const LAYOUTS = ["grid", "board", "calendar"];
+const META_TYPES = ["created_time", "last_edited_time"];
 
 export type Action = { type: string; [k: string]: unknown };
 
@@ -247,10 +248,12 @@ function crossCheck(a: Action, st: State): boolean {
   if (t === "row.update") return Object.keys(a.cells as object).length > 0;
   const db = st.dbs.get(a.database_id as string);
   if (t === "row.remove") {
+    // Timestamp metadata is regenerated on restore, so it doesn't block.
     const cells = db!.rows.get(a.row_id as string)!;
-    return Object.entries(cells).every(([k, c]) =>
-      !c || db!.fields.get(k)?.writable
-    );
+    return Object.entries(cells).every(([k, c]) => {
+      const f = db!.fields.get(k);
+      return !c || f?.writable || META_TYPES.includes(f?.type as string);
+    });
   }
   if (t === "option.add") {
     const f = db!.fields.get(a.field_id as string)!;

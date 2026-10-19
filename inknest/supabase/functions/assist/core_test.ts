@@ -289,6 +289,37 @@ Deno.test("databases, writable cells and row.remove", () => {
   );
 });
 
+Deno.test("timestamp metadata fields don't block row.remove", () => {
+  const db = context.databases[0];
+  const out = v([
+    { type: "row.remove", database_id: "d1", row_id: "r3" },
+    { type: "row.remove", database_id: "d1", row_id: "r4" },
+  ], {
+    ...req,
+    context: {
+      ...context,
+      databases: [{
+        ...db,
+        fields: [
+          ...db.fields,
+          { id: "f4", name: "Created", type: "created_time", writable: false },
+          {
+            id: "f5",
+            name: "Edited",
+            type: "last_edited_time",
+            writable: false,
+          },
+        ],
+        rows: [
+          { id: "r3", cells: { f1: "a", f4: "2026-10-19", f5: "2026-10-20" } },
+          { id: "r4", cells: { f4: "2026-10-19", f2: "http://a" } },
+        ],
+      }],
+    },
+  });
+  assertEquals(out.map((a) => a.row_id), ["r3"]);
+});
+
 Deno.test("parseAssistRequest rejects bad shapes", () => {
   assertEquals(
     parseAssistRequest({
