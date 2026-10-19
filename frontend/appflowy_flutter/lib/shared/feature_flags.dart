@@ -162,3 +162,6 @@ enum FeatureFlag {
 }
 
 FeatureFlagMap _values = {};
+
+/// InkNest: AppFlowy's built-in AI (AppFlowy Cloud) is hidden; InkNest uses its own assistant.
+const bool kAppFlowyAI = false;

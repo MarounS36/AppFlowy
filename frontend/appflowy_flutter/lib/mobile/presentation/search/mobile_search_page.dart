@@ -1,3 +1,4 @@
+import 'package:appflowy/shared/feature_flags.dart';
 import 'package:appflowy/generated/locale_keys.g.dart';
 import 'package:appflowy/startup/startup.dart';
 import 'package:appflowy/user/application/auth/auth_service.dart';
@@ -81,6 +82,7 @@ class MobileSearchPage extends StatefulWidget {
 
 class _MobileSearchPageState extends State<MobileSearchPage> {
   bool get enableShowAISearch =>
+      kAppFlowyAI &&
       widget.userProfile.workspaceType == WorkspaceTypePB.ServerW;
 
   final focusNode = FocusNode();

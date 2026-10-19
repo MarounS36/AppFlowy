@@ -1,3 +1,4 @@
+import 'package:appflowy/shared/feature_flags.dart';
 import 'package:appflowy/generated/flowy_svgs.g.dart';
 import 'package:appflowy/generated/locale_keys.g.dart';
 import 'package:appflowy/workspace/application/command_palette/command_palette_bloc.dart';
@@ -15,6 +16,7 @@ class SearchAskAiEntrance extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    if (!kAppFlowyAI) return const SizedBox.shrink();
     final bloc = context.read<CommandPaletteBloc?>(), state = bloc?.state;
     if (bloc == null || state == null) return _AskAIFor();
 

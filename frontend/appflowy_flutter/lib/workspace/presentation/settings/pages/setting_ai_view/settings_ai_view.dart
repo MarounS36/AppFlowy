@@ -1,3 +1,4 @@
+import 'package:appflowy/shared/feature_flags.dart';
 import 'package:appflowy/features/assistant/presentation/ask_inknest_button.dart';
 import 'package:appflowy/generated/locale_keys.g.dart';
 import 'package:appflowy/workspace/application/settings/ai/settings_ai_bloc.dart';
@@ -32,9 +33,11 @@ class SettingsAIView extends StatelessWidget {
         title: LocaleKeys.settings_aiPage_title.tr(),
         description: LocaleKeys.settings_aiPage_keys_aiSettingsDescription.tr(),
         children: [
-          const AIModelSelection(),
-          const _AISearchToggle(value: false),
-          const LocalAISetting(),
+          if (kAppFlowyAI) ...[
+            const AIModelSelection(),
+            const _AISearchToggle(value: false),
+            const LocalAISetting(),
+          ],
           const AssistantSettingsToggle(),
         ],
       ),

@@ -1,3 +1,4 @@
+import 'package:appflowy/shared/feature_flags.dart';
 import 'package:appflowy/features/shared_section/presentation/m_shared_section.dart';
 import 'package:appflowy/features/workspace/logic/workspace_bloc.dart';
 import 'package:appflowy/mobile/application/mobile_router.dart';
@@ -164,7 +165,7 @@ class _MobileHomePageTabState extends State<MobileHomePageTab>
         case MobileSpaceTabType.recent:
           return const MobileRecentSpace();
         case MobileSpaceTabType.spaces:
-          final showAIFloatingButton =
+          final showAIFloatingButton = kAppFlowyAI &&
               widget.userProfile.workspaceType == WorkspaceTypePB.ServerW;
           return Stack(
             children: [

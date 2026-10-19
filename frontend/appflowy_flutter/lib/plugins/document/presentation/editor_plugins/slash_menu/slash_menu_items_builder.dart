@@ -1,3 +1,4 @@
+import 'package:appflowy/shared/feature_flags.dart';
 import 'package:appflowy/plugins/document/application/document_bloc.dart';
 import 'package:appflowy/plugins/document/presentation/editor_plugins/ai/operations/ai_writer_node_extension.dart';
 import 'package:appflowy/plugins/document/presentation/editor_plugins/plugins.dart';
@@ -62,8 +63,10 @@ List<SelectionMenuItem> _defaultSlashMenuItems({
 }) {
   return [
     // ai
-    if (!isEmpty) continueWritingSlashMenuItem,
-    aiWriterSlashMenuItem,
+    if (kAppFlowyAI) ...[
+      if (!isEmpty) continueWritingSlashMenuItem,
+      aiWriterSlashMenuItem,
+    ],
 
     paragraphSlashMenuItem,
 
