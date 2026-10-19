@@ -27,7 +27,7 @@ abstract class _Base implements ActionHandler {
   final BoardGateway gw;
 
   @override
-  AssistStage get stage => AssistStage.workspace;
+  AssistStage get stage => AssistStage.schedule;
 
   /// Each key in [keys] must be a known (or earlier-created) id; the board
   /// must be editable.

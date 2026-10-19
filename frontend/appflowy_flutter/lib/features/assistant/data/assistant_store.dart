@@ -6,8 +6,8 @@ import 'package:appflowy_backend/log.dart';
 
 import 'assistant_models.dart';
 
-const _maxApplied = 20;
-const _maxTurns = 10;
+const kMaxApplied = 20;
+const kMaxTurns = 10;
 
 /// Persists [AssistantState] for one user in [KeyValueStorage].
 class AssistantStore {
@@ -42,9 +42,9 @@ class AssistantStore {
   Future<void> save(AssistantState state) {
     final json = state.toJson();
     json['applied'] =
-        _last(state.applied, _maxApplied).map((e) => e.toJson()).toList();
+        _last(state.applied, kMaxApplied).map((e) => e.toJson()).toList();
     json['thread'] =
-        _last(state.thread, _maxTurns).map((e) => e.toJson()).toList();
+        _last(state.thread, kMaxTurns).map((e) => e.toJson()).toList();
     return _kv.set(_key, jsonEncode(json));
   }
 }

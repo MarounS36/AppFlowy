@@ -41,7 +41,7 @@ class ActionEngine {
         continue; // malformed server JSON
       }
       // A temp id may be declared once; a re-declaration would rebind it.
-      final temps = _declaredTemps(a).toList();
+      final temps = declaredTemps(a).toList();
       if (temps.toSet().length != temps.length ||
           temps.any(s.boundTemps.contains)) {
         continue;
@@ -127,7 +127,7 @@ class ActionEngine {
 
 /// `new:` ids in `temp_id` plus nested ones in `columns` (board.create) and
 /// `fields` (database.create).
-Iterable<String> _declaredTemps(AssistAction a) sync* {
+Iterable<String> declaredTemps(AssistAction a) sync* {
   if (a.fields['temp_id'] case final String t when t.startsWith('new:')) {
     yield t;
   }

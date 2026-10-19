@@ -3,6 +3,8 @@ import 'dart:async';
 import 'package:appflowy/core/config/kv.dart';
 import 'package:appflowy/features/ai_organize/data/organize_api.dart';
 import 'package:appflowy/features/ai_organize/data/organize_models.dart';
+import 'package:appflowy/features/assistant/actions/board_actions.dart';
+import 'package:appflowy/features/assistant/actions/calendar_actions.dart';
 import 'package:appflowy/features/assistant/data/assist_api.dart';
 import 'package:appflowy/features/assistant/data/assistant_models.dart';
 import 'package:appflowy/features/assistant/data/assistant_store.dart';
@@ -22,10 +24,24 @@ class _MockBoards extends Mock implements BoardGateway {}
 
 class _MockApi extends Mock implements AssistApi {}
 
+/// The next [failSets] writes throw.
+class _FlakyKv extends DartKeyValue {
+  int failSets = 0;
+
+  @override
+  Future<void> set(String key, String value) {
+    if (failSets > 0) {
+      failSets--;
+      throw Exception('disk full');
+    }
+    return super.set(key, value);
+  }
+}
+
 final calls = <String>[];
 
-/// `ref` must be a context id; `destructive` marks the preview; an action
-/// whose `n` is in [failing] throws once.
+/// `ref` must be a context id; `destructive` marks the preview; only `title`
+/// is editable; an action whose `n` is in [failing] throws once.
 class _Fake implements ActionHandler {
   _Fake(this.type, [this.stage = AssistStage.schedule]);
 
@@ -44,7 +60,11 @@ class _Fake implements ActionHandler {
 
   @override
   ActionPreview describe(AssistAction a, Map<String, String> labels) =>
-      ActionPreview(text: type, destructive: a.fields['destructive'] == true);
+      ActionPreview(
+        text: type,
+        destructive: a.fields['destructive'] == true,
+        editable: const ['title'],
+      );
 
   @override
   Future<UndoRecord> apply(AssistAction a, ApplyScope scope) async {
@@ -68,6 +88,7 @@ AssistAction act(
   int n, {
   String type = 'cal.x',
   String? ref,
+  String? temp,
   bool destructive = false,
 }) =>
     AssistAction(
@@ -76,6 +97,7 @@ AssistAction act(
         'type': type,
         'n': n,
         if (ref != null) 'ref': ref,
+        if (temp != null) 'temp_id': temp,
         if (destructive) 'destructive': true,
       },
     );
@@ -103,7 +125,7 @@ void main() {
   late _MockCalendar calendar;
   late _MockBoards boards;
   late _MockApi api;
-  late KeyValueStorage kv;
+  late _FlakyKv kv;
   late _Fake cal;
   late _Fake page;
   late List<String> tokens;
@@ -111,10 +133,10 @@ void main() {
 
   AssistantStore store() => AssistantStore(kv: kv, userId: 'u1');
 
-  AssistantService service() => AssistantService(
+  AssistantService service([ActionEngine? engine]) => AssistantService(
         store: store(),
         api: api,
-        engine: ActionEngine([cal, page]),
+        engine: engine ?? ActionEngine([cal, page]),
         calendar: calendar,
         boards: boards,
         accessToken: () async =>
@@ -137,9 +159,19 @@ void main() {
     return s;
   }
 
-  Future<void> seed(Proposal p) => store().save(
-        AssistantState(consentedStage: AssistStage.schedule, proposal: p),
+  Future<void> seed(Proposal p, {List<AppliedProposal>? applied}) =>
+      store().save(
+        AssistantState(
+          consentedStage: AssistStage.schedule,
+          proposal: p,
+          applied: applied,
+        ),
       );
+
+  ActionEngine realEngine() => ActionEngine([
+        ...calendarHandlers(calendar),
+        ...boardHandlers(boards),
+      ]);
 
   setUpAll(() => registerFallbackValue(DateTime(2026)));
 
@@ -147,7 +179,7 @@ void main() {
     TestWidgetsFlutterBinding.ensureInitialized();
     SharedPreferences.setMockInitialValues({});
     Log.shared.disableLog = true;
-    kv = DartKeyValue();
+    kv = _FlakyKv();
     calendar = _MockCalendar();
     boards = _MockBoards();
     api = _MockApi();
@@ -221,19 +253,96 @@ void main() {
       verifyNever(() => boards.board('page9'));
     });
 
-    test('follow-up sends the current proposal', () async {
+    test('follow-up sends the current proposal as the user sees it', () async {
       final s = await consented();
-      reply([act(0, ref: 'b1')], note: 'Added it');
-      final first = await s.send('add gym', mentionIds: []);
+      reply([act(0, ref: 'b1'), act(1)], note: 'Added it');
+      (await s.send('add gym', mentionIds: []))!
+        ..ticked = {0}
+        ..edits = {
+          0: {'title': 'Gym', 'n': 99},
+        };
       await s.send('also Friday', mentionIds: []);
 
       final body = bodies.last;
-      expect(body['proposal'], [first!.actions.single.fields]);
+      expect(
+        body['proposal'],
+        [
+          {'type': 'cal.x', 'n': 0, 'ref': 'b1', 'title': 'Gym'},
+        ],
+        reason: 'ticked actions only, with edits to editable keys',
+      );
       expect(body['messages'], [
         {'role': 'user', 'text': 'add gym'},
         {'role': 'assistant', 'text': 'Added it'},
         {'role': 'user', 'text': 'also Friday'},
       ]);
+    });
+
+    test('real handlers offer board and calendar actions at stage schedule',
+        () async {
+      final s = service(realEngine());
+      await s.setConsentedStage(AssistStage.schedule);
+      await s.send('hi', mentionIds: []);
+      expect(
+        bodies.single['allowed_actions'],
+        containsAll(['board.create', 'calendar.add']),
+      );
+    });
+
+    test('a follow-up details the boards the open proposal touches', () async {
+      when(() => boards.board('b1')).thenAnswer(
+        (_) async => const BoardSnapshot(
+          id: 'b1',
+          name: 'Sprint',
+          columns: [BoardColumn(id: 'todo', name: 'To do', isDefault: false)],
+          cards: [BoardCard(id: 'c1', title: 'Spec', columnId: 'todo')],
+          editable: true,
+        ),
+      );
+      AssistAction update(String title) => AssistAction(
+            type: 'board.card.update',
+            fields: {
+              'type': 'board.card.update',
+              'board_id': 'b1',
+              'card_id': 'c1',
+              'title': title,
+            },
+          );
+      await seed(proposal([update('Write spec')]));
+      reply([update('Write the spec')]);
+
+      final p = await service(realEngine()).send(
+        'make it longer',
+        mentionIds: [],
+      );
+
+      verify(() => boards.board('b1')).called(1);
+      expect(p!.actions.single.fields['title'], 'Write the spec');
+    });
+
+    test('a reply that arrives after the proposal was applied is dropped',
+        () async {
+      await seed(proposal([act(0)]));
+      final s = service();
+      final started = Completer<void>();
+      final gate = Completer<AssistReply>();
+      when(
+        () => api.send(token: any(named: 'token'), body: any(named: 'body')),
+      ).thenAnswer((_) {
+        started.complete();
+        return gate.future;
+      });
+
+      final sending = s.send('also Friday', mentionIds: []);
+      await started.future;
+      await s.apply();
+      gate.complete(AssistReply(note: 'Revised', actions: [act(1)]));
+
+      expect(await sending, isNull);
+      final saved = await store().load();
+      expect(saved.proposal, isNull);
+      expect(saved.thread.last.text, 'Revised');
+      expect(calls, ['apply 0']);
     });
 
     test('sends only the last 10 turns', () async {
@@ -353,7 +462,7 @@ void main() {
           [act(0), act(1), act(2)],
           ticked: {2, 0},
           edits: {
-            2: {'title': 'Edited'},
+            2: {'title': 'Edited', 'n': 99},
           },
         ),
       );
@@ -367,7 +476,11 @@ void main() {
 
       final p = await s.apply();
 
-      expect(calls, ['apply 0', 'apply 2 Edited']);
+      expect(
+        calls,
+        ['apply 0', 'apply 2 Edited'],
+        reason: 'n is not editable, so its edit is ignored',
+      );
       expect(seen, [0, 1], reason: 'saved before the first and after each');
       expect(p.status, AppliedStatus.applied);
       final saved = (await store().load()).applied.single;
@@ -414,6 +527,70 @@ void main() {
 
       await s.retry('p1');
       expect(calls, hasLength(4), reason: 'only partial ones are retried');
+    });
+
+    test('apply refuses when nothing is ticked', () async {
+      await seed(proposal([act(0)], ticked: <int>{}));
+      final s = service();
+
+      await expectLater(s.apply(), throwsStateError);
+
+      final saved = await store().load();
+      expect(saved.proposal, isNotNull);
+      expect(saved.applied, isEmpty);
+      expect(calls, isEmpty);
+    });
+
+    test('apply refuses a temp id declared only by an unticked action',
+        () async {
+      await seed(
+        proposal([act(0, temp: 'new:1'), act(1, ref: 'new:1')], ticked: {1}),
+      );
+      final s = service();
+
+      await expectLater(s.apply(), throwsStateError);
+      expect((await s.state()).applied, isEmpty);
+      expect((await store().load()).proposal, isNotNull);
+
+      (await s.state()).proposal!.ticked = {0, 1};
+      await s.apply();
+      expect(calls, ['apply 0', 'apply 1']);
+    });
+
+    test('retry resumes a proposal left applying by a failed save', () async {
+      await seed(proposal([act(0)]));
+      final s = service();
+      kv.failSets = 1;
+
+      await expectLater(s.apply(), throwsException);
+      expect((await s.state()).applied.single.status, AppliedStatus.applying);
+      expect(calls, isEmpty);
+
+      expect((await s.retry('p1')).status, AppliedStatus.applied);
+      expect(calls, ['apply 0']);
+    });
+
+    test('apply keeps the newest 20 applied in memory', () async {
+      await seed(
+        proposal([act(0)]),
+        applied: [
+          for (var i = 0; i < 20; i++)
+            AppliedProposal(
+              id: 'old$i',
+              appliedAt: DateTime.utc(2026),
+              actions: [],
+              status: AppliedStatus.applied,
+            ),
+        ],
+      );
+      final s = service();
+
+      await s.apply();
+
+      final applied = (await s.state()).applied;
+      expect(applied, hasLength(20));
+      expect(applied.first.id, 'old1');
+      expect(applied.last.id, 'p1');
     });
 
     test('undo marks undone and persists', () async {

@@ -25,8 +25,6 @@ import 'package:nanoid/nanoid.dart';
 /// Highest stage this build can act on. Task 14 → pages, Task 16 → workspace.
 const AssistStage kBuiltStage = AssistStage.schedule;
 
-const _maxTurns = 10;
-
 /// Sends "Ask InkNest" messages, keeps the proposal, applies and undoes it.
 ///
 /// Like OrganizeService, state is loaded once and shared, and every
@@ -166,15 +164,19 @@ class AssistantService {
   ) async {
     final week = targetWeekStart(_now(), message);
     final weekStart = week.toIso8601String().substring(0, 10);
-    final boardIds = {for (final b in await _boards.boards()) b.id};
-    final cal = await calendarContext(_calendar, week);
-    final board = await boardContext(
-      _boards,
-      mentionIds.where(boardIds.contains).toList(),
-    );
-    final parts = [cal, board];
     final open = s.proposal;
-    final turns = s.thread.sublist(max(0, s.thread.length - _maxTurns));
+    final boardIds = {for (final b in await _boards.boards()) b.id};
+    // Mentioned boards, then those the open proposal touches (a `new:` id is
+    // not a board yet, so it drops out here).
+    final detailed = {
+      ...mentionIds,
+      for (final a in open?.actions ?? const <AssistAction>[])
+        if (a.fields['board_id'] case final String id) id,
+    }.where(boardIds.contains).take(3).toList();
+    final cal = await calendarContext(_calendar, week);
+    final board = await boardContext(_boards, detailed);
+    final parts = [cal, board];
+    final turns = s.thread.sublist(max(0, s.thread.length - kMaxTurns));
     final reply = await _post({
       'allowed_actions': _engine.typesUpTo(stage),
       'messages': [for (final t in turns) t.toJson()],
@@ -183,7 +185,7 @@ class AssistantService {
         'calendar': cal.json,
         'boards': board.json['boards'],
       },
-      if (open != null) 'proposal': [for (final a in open.actions) a.fields],
+      if (open != null) 'proposal': [for (final a in _chosen(open)) a.fields],
     });
 
     // The server validates too; never let an action we can't check through.
@@ -199,6 +201,13 @@ class AssistantService {
       stage: stage,
     );
     final labels = {for (final p in parts) ...p.labels};
+    s.thread.add(ChatTurn(role: 'assistant', text: reply.note));
+    // Applied (or replaced) while we waited: the reply revises a proposal
+    // that is gone, so keep only its note.
+    if (!identical(s.proposal, open)) {
+      await _store.save(s);
+      return null;
+    }
     final proposal = actions.isEmpty
         ? null
         : Proposal(
@@ -212,7 +221,6 @@ class AssistantService {
                 if (!_engine.describe(actions[i], labels).destructive) i,
             },
           );
-    s.thread.add(ChatTurn(role: 'assistant', text: reply.note));
     s.proposal = proposal;
     await _store.save(s);
     return proposal;
@@ -237,24 +245,31 @@ class AssistantService {
   }
 
   /// Applies the open proposal's ticked actions, in order, with the user's
-  /// edits. Saved before the first action and after each. Throws StateError
-  /// when no proposal is open (a second tap finds it already taken).
+  /// edits. Saved before the first action and after each. Throws StateError,
+  /// recording nothing, when no proposal is open (a second tap finds it
+  /// already taken), nothing is ticked, or a ticked action needs a `new:` id
+  /// that only an unticked one creates.
   Future<AppliedProposal> apply() async {
     final s = await state();
     final open = s.proposal ?? (throw StateError('No open proposal'));
+    final actions = _chosen(open);
+    if (actions.isEmpty) throw StateError('Nothing ticked');
+    final declared = {for (final a in actions) ...declaredTemps(a)};
+    if (actions
+        .expand((a) => _tempIds(a.fields))
+        .any((t) => !declared.contains(t))) {
+      throw StateError('A ticked change needs one that is not ticked');
+    }
     final p = AppliedProposal(
       id: open.id,
       appliedAt: _now().toUtc(),
-      actions: [
-        for (final i in open.ticked.toList()..sort())
-          AssistAction(
-            type: open.actions[i].type,
-            fields: {...open.actions[i].fields, ...?open.edits[i]},
-          ),
-      ],
+      actions: actions,
     );
     return _guard(p.id, () async {
       s.applied.add(p);
+      if (s.applied.length > kMaxApplied) {
+        s.applied.removeRange(0, s.applied.length - kMaxApplied);
+      }
       s.proposal = null;
       await _store.save(s);
       await _engine.apply(p, onProgress: () => _store.save(s));
@@ -263,13 +278,17 @@ class AssistantService {
     });
   }
 
-  /// Continues a `partial` proposal from its first undone action; any other
-  /// status is returned untouched.
+  /// Continues a `partial` proposal from its first undone action, or an
+  /// `applying` one whose run stopped before its first save (the guard rules
+  /// out a live run); any other status is returned untouched.
   Future<AppliedProposal> retry(String appliedId) async {
     final s = await state();
     final p = s.applied.firstWhere((a) => a.id == appliedId);
     return _guard(p.id, () async {
-      if (p.status != AppliedStatus.partial) return p;
+      if (p.status != AppliedStatus.partial &&
+          p.status != AppliedStatus.applying) {
+        return p;
+      }
       await _engine.apply(p, onProgress: () => _store.save(s));
       await _store.save(s);
       return p;
@@ -296,6 +315,23 @@ class AssistantService {
     await _store.save(s);
   }
 
+  /// The ticked actions, in order, with the user's edits to keys the
+  /// preview marks editable (others are ignored). What apply runs and what a
+  /// follow-up sends back.
+  List<AssistAction> _chosen(Proposal p) => [
+        for (final i in p.ticked.toList()..sort())
+          if (p.actions[i] case final a)
+            AssistAction(
+              type: a.type,
+              fields: {
+                ...a.fields,
+                for (final e in {...?p.edits[i]}.entries)
+                  if (_engine.describe(a, p.labels).editable.contains(e.key))
+                    e.key: e.value,
+              },
+            ),
+      ];
+
   /// Claims [id] synchronously; a concurrent apply/retry/undo of the same
   /// proposal throws StateError instead of running the engine again.
   Future<T> _guard<T>(String id, Future<T> Function() run) async {
@@ -304,6 +340,21 @@ class AssistantService {
       return await run();
     } finally {
       _busy.remove(id);
+    }
+  }
+}
+
+/// Every `new:` id anywhere in [v], declared or referenced.
+Iterable<String> _tempIds(Object? v) sync* {
+  if (v is String && v.startsWith('new:')) yield v;
+  if (v is Map) {
+    for (final x in v.values) {
+      yield* _tempIds(x);
+    }
+  }
+  if (v is List) {
+    for (final x in v) {
+      yield* _tempIds(x);
     }
   }
 }
