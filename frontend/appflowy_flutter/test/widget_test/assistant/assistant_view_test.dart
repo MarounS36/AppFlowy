@@ -72,8 +72,9 @@ void main() {
     await tester.pump();
   }
 
-  void consented() => when(() => service.state()).thenAnswer(
-        (_) async => AssistantState(consentedStage: AssistStage.schedule),
+  void consented([AssistStage stage = AssistStage.pages]) =>
+      when(() => service.state()).thenAnswer(
+        (_) async => AssistantState(consentedStage: stage),
       );
 
   testWidgets('a limit error shows its text and no Retry', (tester) async {
@@ -178,9 +179,7 @@ void main() {
   }
 
   testWidgets('removing a chip excludes its id from send', (tester) async {
-    when(() => service.state()).thenAnswer(
-      (_) async => AssistantState(consentedStage: AssistStage.schedule),
-    );
+    consented();
     await tester.pumpWidget(
       themed(AssistantView(service: service)),
     );
@@ -222,5 +221,58 @@ void main() {
       () => service.send('move and trip', mentionIds: ['b1', 'b2']),
     ]);
     await tester.pump(const Duration(seconds: 5));
+  });
+
+  testWidgets('stage 2 consent: Continue records pages, then sends',
+      (tester) async {
+    consented(AssistStage.schedule);
+    await typeAndSend(tester);
+    expect(find.text('assistant.consentStage2'), findsOneWidget);
+    await tester.tap(find.text('assistant.consentAccept'));
+    await tester.pumpAndSettle();
+    verifyInOrder([
+      () => service.setConsentedStage(AssistStage.pages),
+      () => service.send('move and trip', mentionIds: ['b1', 'b2']),
+    ]);
+    await tester.pump(const Duration(seconds: 5));
+  });
+
+  testWidgets('stage 2 consent: cancel keeps stage 1, sends, asks once',
+      (tester) async {
+    consented(AssistStage.schedule);
+    await typeAndSend(tester);
+    await tester.tap(find.text('button.cancel'));
+    await tester.pumpAndSettle();
+    verifyNever(() => service.setConsentedStage(any()));
+    verify(() => service.send('move and trip', mentionIds: ['b1', 'b2']))
+        .called(1);
+    await tester.pump(const Duration(seconds: 5));
+
+    await tester.enterText(find.byType(TextField), 'again');
+    await tester.pump(const Duration(seconds: 1));
+    await tester.tap(find.text('assistant.send'));
+    await tester.pumpAndSettle();
+    expect(find.text('assistant.consentStage2'), findsNothing);
+    verify(() => service.send('again', mentionIds: any(named: 'mentionIds')))
+        .called(1);
+    await tester.pump(const Duration(seconds: 5));
+  });
+
+  testWidgets('first use asks stage 1 only', (tester) async {
+    await typeAndSend(tester);
+    expect(find.text('assistant.consentStage1'), findsOneWidget);
+    expect(find.text('assistant.consentStage2'), findsNothing);
+  });
+
+  testWidgets('New page chip fills the input', (tester) async {
+    consented();
+    await tester.pumpWidget(themed(AssistantView(service: service)));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('assistant.newPage'));
+    await tester.pump(const Duration(seconds: 1));
+    expect(
+      tester.widget<TextField>(find.byType(TextField)).controller!.text,
+      'assistant.newPage',
+    );
   });
 }

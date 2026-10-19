@@ -36,6 +36,7 @@ class _AssistantViewState extends State<AssistantView> {
   final _removed = <String>{};
   bool _working = false;
   bool _consenting = false;
+  bool _askedPages = false;
   int _chipSeq = 0;
   OrganizeErrorKind? _error;
 
@@ -75,14 +76,33 @@ class _AssistantViewState extends State<AssistantView> {
     }
   }
 
+  /// First use: stage 1, or nothing is sent. Later, once per view, a build
+  /// that can do pages asks for stage 2; declining keeps stage 1 and sends.
   Future<bool> _consent() async {
-    if ((await _s.state()).consentedStage != AssistStage.none) return true;
+    final stage = (await _s.state()).consentedStage;
+    if (stage == AssistStage.none) {
+      if (!await _ask(LocaleKeys.assistant_consentStage1)) return false;
+      await _s.setConsentedStage(AssistStage.schedule);
+      return true;
+    }
+    if (kBuiltStage.index >= AssistStage.pages.index &&
+        stage == AssistStage.schedule &&
+        !_askedPages) {
+      _askedPages = true;
+      if (await _ask(LocaleKeys.assistant_consentStage2)) {
+        await _s.setConsentedStage(AssistStage.pages);
+      }
+    }
+    return mounted;
+  }
+
+  Future<bool> _ask(String textKey) async {
     if (!mounted) return false;
     final ok = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
         title: Text(LocaleKeys.assistant_consentTitle.tr()),
-        content: Text(LocaleKeys.assistant_consentStage1.tr()),
+        content: Text(textKey.tr()),
         actions: [
           TextButton(
             onPressed: () => Navigator.of(ctx).pop(false),
@@ -95,9 +115,7 @@ class _AssistantViewState extends State<AssistantView> {
         ],
       ),
     );
-    if (ok != true) return false;
-    await _s.setConsentedStage(AssistStage.schedule);
-    return true;
+    return ok == true;
   }
 
   Future<void> _send() async {
@@ -317,6 +335,7 @@ class _AssistantViewState extends State<AssistantView> {
               for (final (label, _) in [
                 (LocaleKeys.assistant_planWeek, 0),
                 (LocaleKeys.assistant_newBoard, 1),
+                (LocaleKeys.assistant_newPage, 2),
               ])
                 ActionChip(
                   label: Text(label.tr()),

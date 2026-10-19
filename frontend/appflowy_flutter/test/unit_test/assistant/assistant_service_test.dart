@@ -5,11 +5,13 @@ import 'package:appflowy/features/ai_organize/data/organize_api.dart';
 import 'package:appflowy/features/ai_organize/data/organize_models.dart';
 import 'package:appflowy/features/assistant/actions/board_actions.dart';
 import 'package:appflowy/features/assistant/actions/calendar_actions.dart';
+import 'package:appflowy/features/assistant/actions/page_content_actions.dart';
 import 'package:appflowy/features/assistant/data/assist_api.dart';
 import 'package:appflowy/features/assistant/data/assistant_models.dart';
 import 'package:appflowy/features/assistant/data/assistant_store.dart';
 import 'package:appflowy/features/assistant/gateways/board_gateway.dart';
 import 'package:appflowy/features/assistant/gateways/calendar_gateway.dart';
+import 'package:appflowy/features/assistant/gateways/page_gateway.dart';
 import 'package:appflowy/features/assistant/logic/action_engine.dart';
 import 'package:appflowy/features/assistant/logic/action_handler.dart';
 import 'package:appflowy/features/assistant/logic/assistant_service.dart';
@@ -21,6 +23,8 @@ import 'package:shared_preferences/shared_preferences.dart';
 class _MockCalendar extends Mock implements CalendarGateway {}
 
 class _MockBoards extends Mock implements BoardGateway {}
+
+class _MockPages extends Mock implements PageGateway {}
 
 class _MockApi extends Mock implements AssistApi {}
 
@@ -124,6 +128,7 @@ Matcher throwsKind(OrganizeErrorKind kind) => throwsA(
 void main() {
   late _MockCalendar calendar;
   late _MockBoards boards;
+  late _MockPages pages;
   late _MockApi api;
   late _FlakyKv kv;
   late _Fake cal;
@@ -139,6 +144,7 @@ void main() {
         engine: engine ?? ActionEngine([cal, page]),
         calendar: calendar,
         boards: boards,
+        pages: pages,
         accessToken: () async =>
             tokens.length > 1 ? tokens.removeAt(0) : tokens.first,
         now: () => DateTime(2026, 10, 19, 9), // a Monday
@@ -171,6 +177,7 @@ void main() {
   ActionEngine realEngine() => ActionEngine([
         ...calendarHandlers(calendar),
         ...boardHandlers(boards),
+        ...pageContentHandlers(pages),
       ]);
 
   setUpAll(() => registerFallbackValue(DateTime(2026)));
@@ -182,6 +189,7 @@ void main() {
     kv = _FlakyKv();
     calendar = _MockCalendar();
     boards = _MockBoards();
+    pages = _MockPages();
     api = _MockApi();
     cal = _Fake('cal.x');
     page = _Fake('page.x', AssistStage.pages);
@@ -208,6 +216,32 @@ void main() {
       ],
     );
     when(() => boards.board(any())).thenAnswer((_) async => null);
+    when(() => pages.tree()).thenAnswer(
+      (_) async => const [
+        PageRef(
+          id: 's1',
+          name: 'Home',
+          parentId: 'w',
+          layout: 'space',
+          editable: true,
+        ),
+        PageRef(
+          id: 'b1',
+          name: 'Sprint',
+          parentId: 's1',
+          layout: 'board',
+          editable: true,
+        ),
+        PageRef(
+          id: 'p1',
+          name: 'Trip',
+          parentId: 's1',
+          layout: 'document',
+          editable: true,
+        ),
+      ],
+    );
+    when(() => pages.markdown(any())).thenAnswer((_) async => 'Trip notes');
     reply([]);
   });
 
@@ -232,12 +266,12 @@ void main() {
 
     test('send posts only allowed action types for the active stage', () async {
       final s = await consented(AssistStage.workspace);
-      expect(await s.activeStage(), AssistStage.schedule);
+      expect(await s.activeStage(), AssistStage.pages);
 
       await s.send('plan next week with Sprint', mentionIds: ['b1', 'page9']);
 
       final body = bodies.single;
-      expect(body['allowed_actions'], ['cal.x']);
+      expect(body['allowed_actions'], ['cal.x', 'page.x']);
       expect(body['messages'], [
         {'role': 'user', 'text': 'plan next week with Sprint'},
       ]);
@@ -287,6 +321,53 @@ void main() {
         bodies.single['allowed_actions'],
         containsAll(['board.create', 'calendar.add']),
       );
+    });
+
+    test('page_texts only for mentioned pages, only when consented to pages',
+        () async {
+      final s = await consented();
+      await s.send('notes for Trip', mentionIds: ['p1']);
+      final first = bodies.last['context'] as Map;
+      expect(first.containsKey('pages'), isFalse);
+      expect(first.containsKey('page_texts'), isFalse);
+      verifyNever(() => pages.tree());
+      verifyNever(() => pages.markdown(any()));
+
+      await s.setConsentedStage(AssistStage.pages);
+      await s.send('notes for Trip', mentionIds: ['b1', 'p1']);
+      final ctx = bodies.last['context'] as Map;
+      expect(
+        [for (final p in ctx['pages'] as List) (p as Map)['id']],
+        ['s1', 'b1', 'p1'],
+      );
+      expect(ctx['page_texts'], [
+        {'id': 'p1', 'markdown': 'Trip notes'},
+      ]);
+
+      await s.send('anything', mentionIds: []);
+      expect((bodies.last['context'] as Map)['page_texts'], isEmpty);
+      verify(() => pages.markdown('p1')).called(1);
+    });
+
+    test('page actions pass client validation only at stage pages', () async {
+      final append = AssistAction(
+        type: 'page.append',
+        fields: {'type': 'page.append', 'page_id': 'p1', 'content': 'Hi'},
+      );
+      final s = service(realEngine());
+      await s.setConsentedStage(AssistStage.schedule);
+      reply([append]);
+      expect(await s.send('add to Trip', mentionIds: ['p1']), isNull);
+      expect(bodies.last['allowed_actions'], isNot(contains('page.append')));
+
+      await s.setConsentedStage(AssistStage.pages);
+      final p = await s.send('add to Trip', mentionIds: ['p1']);
+      expect(
+        bodies.last['allowed_actions'],
+        containsAll(['page.create', 'page.append', 'board.create']),
+      );
+      expect(p!.actions.single.type, 'page.append');
+      expect(p.labels['p1'], 'Trip');
     });
 
     test('a follow-up details the boards the open proposal touches', () async {
@@ -453,6 +534,12 @@ void main() {
     );
     expect([for (final e in m) e.id], ['b2', 'b3', 'b1']);
     expect(m.every((e) => e.kind == 'board'), isTrue);
+  });
+
+  test('mentionsFor includes pages, not spaces, boards once', () async {
+    final m = await service().mentionsFor('home: sprint and trip');
+    final got = [for (final e in m) (e.id, e.kind)];
+    expect(got, [('b1', 'board'), ('p1', 'page')]);
   });
 
   test('describe passes through to the engine', () {

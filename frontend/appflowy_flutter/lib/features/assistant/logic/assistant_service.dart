@@ -7,11 +7,13 @@ import 'package:appflowy/features/ai_organize/data/organize_backend.dart';
 import 'package:appflowy/features/ai_organize/data/organize_models.dart';
 import 'package:appflowy/features/assistant/actions/board_actions.dart';
 import 'package:appflowy/features/assistant/actions/calendar_actions.dart';
+import 'package:appflowy/features/assistant/actions/page_content_actions.dart';
 import 'package:appflowy/features/assistant/data/assist_api.dart';
 import 'package:appflowy/features/assistant/data/assistant_models.dart';
 import 'package:appflowy/features/assistant/data/assistant_store.dart';
 import 'package:appflowy/features/assistant/gateways/board_gateway.dart';
 import 'package:appflowy/features/assistant/gateways/calendar_gateway.dart';
+import 'package:appflowy/features/assistant/gateways/page_gateway.dart';
 import 'package:appflowy/features/assistant/logic/action_engine.dart';
 import 'package:appflowy/features/assistant/logic/action_handler.dart';
 import 'package:appflowy/features/assistant/logic/mentions.dart';
@@ -24,7 +26,7 @@ import 'package:flutter/foundation.dart';
 import 'package:nanoid/nanoid.dart';
 
 /// Highest stage this build can act on. Task 14 → pages, Task 16 → workspace.
-const AssistStage kBuiltStage = AssistStage.schedule;
+const AssistStage kBuiltStage = AssistStage.pages;
 
 /// Sends "Ask InkNest" messages, keeps the proposal, applies and undoes it.
 ///
@@ -38,6 +40,7 @@ class AssistantService {
     required ActionEngine engine,
     required CalendarGateway calendar,
     required BoardGateway boards,
+    required PageGateway pages,
     required Future<String?> Function() accessToken,
     DateTime Function()? now,
   })  : _store = store,
@@ -45,6 +48,7 @@ class AssistantService {
         _engine = engine,
         _calendar = calendar,
         _boards = boards,
+        _pages = pages,
         _accessToken = accessToken,
         _now = now ?? DateTime.now;
 
@@ -53,6 +57,7 @@ class AssistantService {
   final ActionEngine _engine;
   final CalendarGateway _calendar;
   final BoardGateway _boards;
+  final PageGateway _pages;
   final Future<String?> Function() _accessToken;
   final DateTime Function() _now;
   Future<AssistantState>? _state;
@@ -81,15 +86,18 @@ class AssistantService {
     return _byUser[userId] ??= () {
       final calendar = CalendarGateway();
       final boards = BoardGateway();
+      final pages = PageGateway();
       return AssistantService(
         store: AssistantStore(kv: getIt<KeyValueStorage>(), userId: userId),
         api: AssistApi(url: url),
         engine: ActionEngine([
           ...calendarHandlers(calendar),
           ...boardHandlers(boards),
+          ...pageContentHandlers(pages),
         ]),
         calendar: calendar,
         boards: boards,
+        pages: pages,
         accessToken: const OrganizeBackend().accessToken,
       );
     }();
@@ -124,14 +132,20 @@ class AssistantService {
     return consented.index < kBuiltStage.index ? consented : kBuiltStage;
   }
 
-  /// [pinnedIds] (header buttons) first, then boards named in [message].
+  /// [pinnedIds] (header buttons) first, then boards and pages named in
+  /// [message].
   Future<List<Mentionable>> mentionsFor(
     String message, {
     List<String> pinnedIds = const [],
   }) async {
+    final boards = await _boards.boards();
+    final boardIds = {for (final b in boards) b.id};
     final items = [
-      for (final b in await _boards.boards())
+      for (final b in boards)
         Mentionable(id: b.id, name: b.name, kind: 'board'),
+      for (final p in await _pages.tree())
+        if (p.layout != 'space' && !boardIds.contains(p.id))
+          Mentionable(id: p.id, name: p.name, kind: 'page'),
     ];
     final byId = {for (final m in items) m.id: m};
     final seen = <String>{};
@@ -188,7 +202,11 @@ class AssistantService {
     }.where(boardIds.contains).take(3).toList();
     final cal = await calendarContext(_calendar, week);
     final board = await boardContext(_boards, detailed);
-    final parts = [cal, board];
+    // Pages (tree + mentioned text) only once consented to that stage.
+    final page = stage.index >= AssistStage.pages.index
+        ? await pageContext(_pages, mentionIds)
+        : null;
+    final parts = [cal, board, if (page != null) page];
     final turns = s.thread.sublist(max(0, s.thread.length - kMaxTurns));
     final reply = await _post({
       'allowed_actions': _engine.typesUpTo(stage),
@@ -197,6 +215,7 @@ class AssistantService {
         'week_start': weekStart,
         'calendar': cal.json,
         'boards': board.json['boards'],
+        ...?page?.json,
       },
       if (open != null) 'proposal': [for (final a in _chosen(open)) a.fields],
     });
