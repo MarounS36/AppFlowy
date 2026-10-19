@@ -455,6 +455,10 @@ void main() {
     expect(m.every((e) => e.kind == 'board'), isTrue);
   });
 
+  test('describe passes through to the engine', () {
+    expect(service().describe(act(0), {}).text, 'cal.x');
+  });
+
   group('apply', () {
     test('apply persists after each action', () async {
       await seed(

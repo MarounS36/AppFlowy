@@ -307,6 +307,10 @@ class AssistantService {
     });
   }
 
+  /// What the UI shows for [a].
+  ActionPreview describe(AssistAction a, Map<String, String> labels) =>
+      _engine.describe(a, labels);
+
   Future<void> clearConversation() async {
     final s = await state();
     s
