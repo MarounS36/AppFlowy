@@ -108,10 +108,12 @@ class AppliedProposal {
     required this.actions,
     List<UndoRecord>? records,
     Map<String, String>? tempIds,
+    Map<String, String>? labels,
     this.status = AppliedStatus.applying,
     this.error,
   })  : records = records ?? [],
-        tempIds = tempIds ?? {};
+        tempIds = tempIds ?? {},
+        labels = labels ?? {};
 
   factory AppliedProposal.fromJson(Map<String, dynamic> json) =>
       AppliedProposal(
@@ -124,6 +126,7 @@ class AppliedProposal {
             .map((e) => UndoRecord.fromJson(e as Map<String, dynamic>))
             .toList(),
         tempIds: Map<String, String>.from(json['tempIds'] as Map? ?? {}),
+        labels: Map<String, String>.from(json['labels'] as Map? ?? {}),
         status: _enum(AppliedStatus.values, json['status']),
         error: json['error'] as String?,
       );
@@ -137,6 +140,9 @@ class AppliedProposal {
   /// One per action done so far.
   final List<UndoRecord> records;
   final Map<String, String> tempIds;
+
+  /// The proposal's id -> name labels, for describing [actions] later.
+  final Map<String, String> labels;
   AppliedStatus status;
   String? error;
 
@@ -146,6 +152,7 @@ class AppliedProposal {
         'actions': actions.map((e) => e.toJson()).toList(),
         'records': records.map((e) => e.toJson()).toList(),
         'tempIds': tempIds,
+        'labels': labels,
         'status': status.name,
         'error': error,
       };

@@ -35,7 +35,8 @@ class _AssistantViewState extends State<AssistantView> {
   List<Mentionable> _chips = const [];
   final _removed = <String>{};
   bool _working = false;
-  bool _discarded = false;
+  bool _consenting = false;
+  int _chipSeq = 0;
   OrganizeErrorKind? _error;
 
   AssistantService get _s => widget.service;
@@ -65,8 +66,9 @@ class _AssistantViewState extends State<AssistantView> {
   }
 
   Future<void> _updateChips() async {
+    final seq = ++_chipSeq;
     final m = await _s.mentionsFor(_input.text, pinnedIds: widget.pinnedIds);
-    if (mounted) {
+    if (mounted && seq == _chipSeq) {
       setState(
         () => _chips = m.where((e) => !_removed.contains(e.id)).toList(),
       );
@@ -101,7 +103,11 @@ class _AssistantViewState extends State<AssistantView> {
   Future<void> _send() async {
     final text = _input.text.trim();
     if (text.isEmpty || _working) return;
-    if (!await _consent() || !mounted) return;
+    if (_consenting) return;
+    _consenting = true;
+    final ok = await _consent();
+    _consenting = false;
+    if (!ok || !mounted) return;
     setState(() {
       _working = true;
       _error = null;
@@ -110,7 +116,6 @@ class _AssistantViewState extends State<AssistantView> {
       final p = await _s.send(text, mentionIds: [for (final c in _chips) c.id]);
       if (!mounted) return;
       _input.clear();
-      _discarded = false;
       _removed.clear();
       if (p == null) {
         showToastNotification(message: LocaleKeys.assistant_nothing.tr());
@@ -180,7 +185,7 @@ class _AssistantViewState extends State<AssistantView> {
   @override
   Widget build(BuildContext context) {
     final s = _state;
-    final proposal = _discarded ? null : s?.proposal;
+    final proposal = s?.proposal;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
@@ -207,7 +212,7 @@ class _AssistantViewState extends State<AssistantView> {
                   onApply: _apply,
                 ),
                 TextButton(
-                  onPressed: () => setState(() => _discarded = true),
+                  onPressed: _working ? null : () => _run(_s.discard),
                   child: Text(LocaleKeys.assistant_discard.tr()),
                 ),
               ],
@@ -261,7 +266,7 @@ class _AssistantViewState extends State<AssistantView> {
 
   Widget _recentRow(AppliedProposal a) {
     final text = [
-      for (final x in a.actions.take(2)) _s.describe(x, const {}).text,
+      for (final x in a.actions.take(2)) _s.describe(x, a.labels).text,
     ].join(', ');
     return Row(
       children: [

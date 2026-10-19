@@ -264,6 +264,7 @@ class AssistantService {
       id: open.id,
       appliedAt: _now().toUtc(),
       actions: actions,
+      labels: {...open.labels},
     );
     return _guard(p.id, () async {
       s.applied.add(p);
@@ -310,6 +311,13 @@ class AssistantService {
   /// What the UI shows for [a].
   ActionPreview describe(AssistAction a, Map<String, String> labels) =>
       _engine.describe(a, labels);
+
+  /// Closes the open proposal without applying it; the thread stays.
+  Future<void> discard() async {
+    final s = await state();
+    s.proposal = null;
+    await _store.save(s);
+  }
 
   Future<void> clearConversation() async {
     final s = await state();

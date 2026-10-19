@@ -73,6 +73,7 @@ void main() {
             UndoRecord(type: 'r', data: {'k': 1}),
           ],
           tempIds: {'t1': 'real'},
+          labels: {'b1': 'Move'},
           status: AppliedStatus.partial,
           error: 'boom',
         ),
@@ -85,6 +86,7 @@ void main() {
     expect(loaded.proposal!.ticked, {1});
     expect(loaded.proposal!.actions.first.tempId, 't1');
     expect(loaded.applied.first.appliedAt.isUtc, true);
+    expect(loaded.applied.first.labels, {'b1': 'Move'});
   });
 
   test('ticked defaults to all indexes', () {

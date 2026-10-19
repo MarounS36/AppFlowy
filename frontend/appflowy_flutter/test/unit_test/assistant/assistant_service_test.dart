@@ -112,7 +112,7 @@ Proposal proposal(
       actions: actions,
       note: '',
       weekStart: '2026-10-19',
-      labels: const {},
+      labels: const {'b1': 'Move'},
       ticked: ticked,
       edits: edits,
     );
@@ -459,6 +459,16 @@ void main() {
     expect(service().describe(act(0), {}).text, 'cal.x');
   });
 
+  test('discard closes the proposal durably and keeps the thread', () async {
+    await seed(proposal([act(0)]));
+    final s = service();
+    (await s.state()).thread.add(ChatTurn(role: 'user', text: 'hi'));
+    await s.discard();
+    final saved = await store().load();
+    expect(saved.proposal, isNull);
+    expect(saved.thread, hasLength(1));
+  });
+
   group('apply', () {
     test('apply persists after each action', () async {
       await seed(
@@ -479,6 +489,7 @@ void main() {
       };
 
       final p = await s.apply();
+      expect(p.labels, {'b1': 'Move'});
 
       expect(
         calls,
