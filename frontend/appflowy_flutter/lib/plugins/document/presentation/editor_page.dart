@@ -94,9 +94,11 @@ class _AppFlowyEditorPageState extends State<AppFlowyEditorPage>
   ];
 
   final List<ToolbarItem> toolbarItems = [
-    improveWritingItem,
-    group0PaddingItem,
-    aiWriterItem,
+    if (kAppFlowyAI) ...[
+      improveWritingItem,
+      group0PaddingItem,
+      aiWriterItem,
+    ],
     customTextHeadingItem,
     buildPaddingPlaceholderItem(
       1,

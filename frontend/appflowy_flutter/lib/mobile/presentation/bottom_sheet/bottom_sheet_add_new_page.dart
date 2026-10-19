@@ -1,3 +1,4 @@
+import 'package:appflowy/shared/feature_flags.dart';
 import 'package:appflowy/generated/flowy_svgs.g.dart';
 import 'package:appflowy/generated/locale_keys.g.dart';
 import 'package:appflowy/mobile/presentation/widgets/widgets.dart';
@@ -63,6 +64,7 @@ class AddNewPageWidgetBottomSheet extends StatelessWidget {
           showBottomBorder: false,
           onTap: () => onAction(ViewLayoutPB.Calendar),
         ),
+        if (kAppFlowyAI)
         FlowyOptionTile.text(
           text: LocaleKeys.chat_newChat.tr(),
           height: 52.0,

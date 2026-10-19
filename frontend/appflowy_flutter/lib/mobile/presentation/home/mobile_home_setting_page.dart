@@ -1,3 +1,4 @@
+import 'package:appflowy/shared/feature_flags.dart';
 import 'package:appflowy/env/cloud_env.dart';
 import 'package:appflowy/env/env.dart';
 import 'package:appflowy/features/ai_organize/presentation/ai_organize_settings_group.dart';
@@ -100,6 +101,7 @@ class _MobileHomeSettingPageState extends State<MobileHomeSettingPage> {
                   const LanguageSettingGroup(),
                   if (Env.enableCustomCloud) const CloudSettingGroup(),
                   if (isAuthEnabled) ...[
+                    if (kAppFlowyAI)
                     AiSettingsGroup(
                       key: ValueKey(currentWorkspaceId),
                       userProfile: userProfile,

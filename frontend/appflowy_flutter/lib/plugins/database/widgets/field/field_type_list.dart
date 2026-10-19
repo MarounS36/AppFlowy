@@ -1,3 +1,4 @@
+import 'package:appflowy/shared/feature_flags.dart';
 import 'package:flutter/material.dart';
 
 import 'package:appflowy/generated/flowy_svgs.g.dart';
@@ -33,7 +34,12 @@ class FieldTypeList extends StatelessWidget with FlowyOverlayDelegate {
 
   @override
   Widget build(BuildContext context) {
-    final cells = _supportedFieldTypes.map((fieldType) {
+    final cells = _supportedFieldTypes
+        .where(
+      (t) =>
+          kAppFlowyAI || (t != FieldType.Summary && t != FieldType.Translate),
+    )
+        .map((fieldType) {
       return FieldTypeCell(
         fieldType: fieldType,
         onSelectField: (fieldType) {

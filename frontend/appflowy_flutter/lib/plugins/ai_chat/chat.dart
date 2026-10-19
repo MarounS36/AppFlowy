@@ -1,3 +1,4 @@
+import 'package:appflowy/shared/feature_flags.dart';
 import 'package:appflowy/features/page_access_level/logic/page_access_level_bloc.dart';
 import 'package:appflowy/generated/flowy_svgs.g.dart';
 import 'package:appflowy/generated/locale_keys.g.dart';
@@ -46,7 +47,7 @@ class AIChatPluginBuilder extends PluginBuilder {
 
 class AIChatPluginConfig implements PluginConfig {
   @override
-  bool get creatable => true;
+  bool get creatable => kAppFlowyAI;
 }
 
 class AIChatPagePlugin extends Plugin {
