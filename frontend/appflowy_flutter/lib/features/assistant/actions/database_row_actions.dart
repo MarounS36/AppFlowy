@@ -29,7 +29,8 @@ class _RowAdd extends _Base {
   @override
   Future<UndoRecord> apply(AssistAction a, ApplyScope scope) async {
     final dbId = db(a, scope);
-    final id = await gw.addRow(dbId, await prepare(dbId, _cellsOf(a), scope));
+    final cells = await prepare(await mustDb(dbId), _cellsOf(a), scope);
+    final id = await gw.addRow(dbId, cells);
     final Map<String, String> after;
     try {
       after = await gw.row(dbId, id) ?? (throw StateError('Row not found'));
@@ -84,12 +85,7 @@ class _RowUpdate extends _Base {
     }
     return super.validate(a, scope) ??
         (_isRow(scope, f['database_id'], f['row_id'])
-            ? _checkCells(
-                scope,
-                f['database_id'],
-                f['cells'],
-                scope.items[f['row_id']]?['cells'] as Map?,
-              )
+            ? _checkCells(scope, f['database_id'], f['cells'], f['row_id'])
             : 'Unknown row_id');
   }
 
@@ -112,11 +108,17 @@ class _RowUpdate extends _Base {
   Future<UndoRecord> apply(AssistAction a, ApplyScope scope) async {
     final dbId = db(a, scope);
     final id = scope.resolve(a.fields['row_id'] as String);
+    final s = await mustDb(dbId);
     final cur = await gw.row(dbId, id) ?? (throw StateError('Row not found'));
-    if (_cellsOf(a).keys.any((k) => isDateRange(cur[scope.resolve(k)] ?? ''))) {
-      throw StateError("A date range can't be changed");
+    // The live row may differ from what the AI saw: no date ranges, and no
+    // cell too long for the context to have held it whole.
+    for (final k in _cellsOf(a).keys.map(scope.resolve)) {
+      final text = cur[k] ?? '';
+      if (_isRangeIn(field(s, k)?.type, text) || text.length > _cellCap) {
+        throw StateError("This cell can't be changed here");
+      }
     }
-    final cells = await prepare(dbId, _cellsOf(a), scope);
+    final cells = await prepare(s, _cellsOf(a), scope);
     final before = {for (final k in cells.keys) k: cur[k] ?? ''};
     await gw.updateRow(dbId, id, cells);
     final Map<String, String> now;
@@ -182,7 +184,7 @@ class _RowRemove extends _Base {
           '${e.value}'.isNotEmpty &&
               scope.readOnlyIds.contains(e.key) &&
               !_metaNames.contains(scope.items[e.key]?['type']) ||
-          isDateRange('${e.value}'),
+          _isRangeIn(_typeOf(scope.items[e.key]?['type']), e.value),
     );
     return lost ? "Row has data that can't be restored" : null;
   }
@@ -204,7 +206,7 @@ class _RowRemove extends _Base {
     for (final f in s.fields) {
       final v = cur[f.id] ?? '';
       if (_blank(f, v) || _isMeta(f.type)) continue;
-      if (!f.writable || isDateRange(v)) {
+      if (!f.writable || _isRangeIn(f.type, v)) {
         throw StateError("${f.name} can't be restored");
       }
       keep[f.id] = v;

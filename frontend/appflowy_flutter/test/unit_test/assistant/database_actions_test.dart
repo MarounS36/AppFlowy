@@ -214,6 +214,64 @@ void main() {
       expect(((rows as List).single['cells'] as Map)['f1'], 'x' * 500);
     });
 
+    test('a cut cell is read-only: a write to it is dropped', () async {
+      final s = await scope([
+        (id: 'r1', cells: {'f1': 'x' * 600, 'f4': '1'}),
+      ]);
+      expect(s.readOnlyIds, contains('r1#f1'));
+      String? write(String field, String value) => h['row.update']!.validate(
+            act('row.update', {
+              'database_id': 'd1',
+              'row_id': 'r1',
+              'cells': {field: value},
+            }),
+            s,
+          );
+      expect(write('f1', 'y'), isNotNull);
+      expect(write('f4', '2'), isNull);
+    });
+
+    test('" → " in a text cell is not a date range', () async {
+      final s = await scope([
+        (id: 'r4', cells: {'f1': 'Paris → Rome'}),
+      ]);
+      expect(
+        h['row.update']!.validate(
+          act('row.update', {
+            'database_id': 'd1',
+            'row_id': 'r4',
+            'cells': {'f1': 'Rome → Paris'},
+          }),
+          s,
+        ),
+        isNull,
+      );
+      expect(
+        h['row.remove']!.validate(
+          act('row.remove', {'database_id': 'd1', 'row_id': 'r4'}),
+          s,
+        ),
+        isNull,
+      );
+
+      db(snap());
+      row('r4', {'f1': 'Paris → Rome'});
+      when(() => gw.removeRow('d1', 'r4')).thenAnswer((_) async {});
+      await h['row.update']!.apply(
+        act('row.update', {
+          'database_id': 'd1',
+          'row_id': 'r4',
+          'cells': {'f1': 'Rome → Paris'},
+        }),
+        ApplyScope({}),
+      );
+      await h['row.remove']!.apply(
+        act('row.remove', {'database_id': 'd1', 'row_id': 'r4'}),
+        ApplyScope({}),
+      );
+      verify(() => gw.removeRow('d1', 'r4')).called(1);
+    });
+
     test('a row with no title is "Untitled row"; non-databases are skipped',
         () async {
       db(
@@ -889,6 +947,66 @@ void main() {
 
       db(snap());
       expect(await h['option.add']!.undo(r), UndoOutcome.skippedGone);
+    });
+  });
+
+  group('apply re-checks', () {
+    test('a cell that grew past the cap since the proposal is not written',
+        () async {
+      db(snap());
+      row('r1', {'f1': 'x' * 501});
+      await expectLater(
+        h['row.update']!.apply(
+          act('row.update', {
+            'database_id': 'd1',
+            'row_id': 'r1',
+            'cells': {'f1': 'short'},
+          }),
+          ApplyScope({}),
+        ),
+        throwsStateError,
+      );
+      verifyNever(() => gw.updateRow(any(), any(), any()));
+    });
+
+    test('an edited name is checked again before writing', () async {
+      db(snap());
+      await expectLater(
+        h['field.rename']!.apply(
+          act('field.rename', {
+            'database_id': 'd1',
+            'field_id': 'f4',
+            'name': 'Page\ncount',
+          }),
+          ApplyScope({}),
+        ),
+        throwsStateError,
+      );
+      await expectLater(
+        h['option.add']!.apply(
+          act('option.add', {
+            'database_id': 'd1',
+            'field_id': 'f6',
+            'name': 'Sci, Fi',
+          }),
+          ApplyScope({}),
+        ),
+        throwsStateError,
+      );
+      await expectLater(
+        h['field.add']!.apply(
+          act('field.add', {
+            'database_id': 'd1',
+            'name': '  ',
+            'field_type': 'text',
+          }),
+          ApplyScope({}),
+        ),
+        throwsStateError,
+      );
+      verifyNever(() => gw.renameField(any(), any(), any()));
+      verifyNever(() => gw.addOption(any(), any(), any()));
+      verifyNever(() => gw.addField(any(), any(), any()));
     });
   });
 

@@ -35,7 +35,19 @@ String? _line(Object? t, String what) {
   return null;
 }
 
-String _trim(Object? v) => (v as String).trim();
+/// The trimmed name, checked again at apply (the user may have edited it).
+String _mustName(Object? v, {bool noComma = false}) {
+  final err = _line(v, 'Name') ??
+      (noComma && (v as String).contains(',') ? 'Name has a comma' : null);
+  if (err != null) throw StateError(err);
+  return (v as String).trim();
+}
+
+/// Context cells longer than this are cut, so they become read-only.
+const _cellCap = 500;
+
+bool _isRangeIn(FieldType? t, Object? text) =>
+    t == FieldType.DateTime && isDateRange('${text ?? ''}');
 
 FieldType? _typeOf(Object? name) =>
     dbTypeNames.entries.where((e) => e.value == name).firstOrNull?.key;
@@ -124,13 +136,14 @@ bool _isRow(ValidationScope s, Object? db, Object? id) {
       item?['cells'] != null;
 }
 
-/// [current]: the row's cells from context, when it has some.
+/// [row]: the row being changed, when it exists already.
 String? _checkCells(
   ValidationScope s,
   Object? db,
   Object? cells, [
-  Map? current,
+  Object? row,
 ]) {
+  final current = s.items[row]?['cells'] as Map?;
   if (cells is! Map || cells.length > 50) return 'Bad cells';
   for (final MapEntry(:key, :value) in cells.entries) {
     if (value is! String || value.length > 2000) return 'Bad cell value';
@@ -139,9 +152,10 @@ String? _checkCells(
     if (f.isEmpty) continue;
     final type = _typeOf(f['type']);
     if (s.readOnlyIds.contains(key) ||
+        s.readOnlyIds.contains('$row#$key') ||
         f['writable'] != true ||
         type == null ||
-        isDateRange('${current?[key] ?? ''}')) {
+        _isRangeIn(type, current?[key])) {
       return 'Field is read-only';
     }
     if (_cellValue(type, value) == null) return 'Bad value for $key';
@@ -195,15 +209,15 @@ abstract class _Base implements ActionHandler {
   DbField? field(DbSnapshot s, String id) =>
       s.fields.where((f) => f.id == id).firstOrNull;
 
-  /// [cells] checked against the live fields (writable, right shape), with
-  /// field temps resolved. Select options that don't exist yet are created
-  /// first (and stay on undo).
+  /// [cells] checked against the live fields of [s] (writable, right
+  /// shape), with field temps resolved. Select options that don't exist yet
+  /// are created first (and stay on undo).
   Future<Map<String, String>> prepare(
-    String dbId,
+    DbSnapshot s,
     Map<String, String> cells,
     ApplyScope scope,
   ) async {
-    final s = await mustDb(dbId);
+    final dbId = s.id;
     final out = <String, String>{};
     for (final e in cells.entries) {
       final id = scope.resolve(e.key);
@@ -263,11 +277,11 @@ class _Create extends _Base {
     final fields = _fields(a);
     final r = await gw.createDatabase(
       scope.resolve(a.fields['parent_id'] as String),
-      _trim(a.fields['name']),
+      _mustName(a.fields['name']),
       _layouts[a.fields['layout']]!,
       [
         for (final f in fields)
-          (name: _trim(f['name']), type: _typeOf(f['type'])!),
+          (name: _mustName(f['name']), type: _typeOf(f['type'])!),
       ],
     );
     final temp = a.tempId;
@@ -311,10 +325,11 @@ class _FieldAdd extends _Base {
   @override
   Future<UndoRecord> apply(AssistAction a, ApplyScope scope) async {
     final dbId = db(a, scope);
+    final name = _mustName(a.fields['name']);
     await mustDb(dbId);
     final id = await gw.addField(
       dbId,
-      _trim(a.fields['name']),
+      name,
       _typeOf(a.fields['field_type'])!,
     );
     final temp = a.tempId;
@@ -367,7 +382,7 @@ class _FieldRename extends _Base {
     final id = scope.resolve(a.fields['field_id'] as String);
     final f =
         field(await mustDb(dbId), id) ?? (throw StateError('Field not found'));
-    final name = _trim(a.fields['name']);
+    final name = _mustName(a.fields['name']);
     await gw.renameField(dbId, id, name);
     return UndoRecord(
       type: type,
@@ -436,7 +451,7 @@ class _OptionAdd extends _Base {
     if (f == null || !_isSelect(f.type)) {
       throw StateError('Not a select field');
     }
-    final name = _trim(a.fields['name']);
+    final name = _mustName(a.fields['name'], noComma: true);
     if (f.options.any((o) => o.name.toLowerCase() == name.toLowerCase())) {
       throw StateError('Option $name exists');
     }
@@ -467,7 +482,8 @@ class _OptionAdd extends _Base {
 }
 
 /// Up to 3 [mentionedIds] that are grids, boards or calendars: fields (with
-/// select options) and rows (non-empty cells as text, ≤ 500 chars each).
+/// select options) and rows (non-empty cells as text, cut to [_cellCap];
+/// a cut cell is read-only as `<row>#<field>`).
 Future<ContextPart> databaseContext(
   DatabaseGateway gw,
   List<String> mentionedIds,
@@ -511,8 +527,13 @@ Future<ContextPart> databaseContext(
       final cells = {
         for (final e in r.cells.entries)
           if (e.value.isNotEmpty)
-            e.key: e.value.length > 500 ? e.value.substring(0, 500) : e.value,
+            e.key: e.value.length > _cellCap
+                ? e.value.substring(0, _cellCap)
+                : e.value,
       };
+      for (final e in r.cells.entries) {
+        if (e.value.length > _cellCap) readOnly.add('${r.id}#${e.key}');
+      }
       ids.add(r.id);
       final title = cells[primary] ?? '';
       labels[r.id] = title.isEmpty ? 'Untitled row' : title;
