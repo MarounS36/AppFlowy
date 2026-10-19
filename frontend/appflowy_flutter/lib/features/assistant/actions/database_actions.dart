@@ -4,7 +4,6 @@ import 'package:appflowy/features/assistant/gateways/database_gateway.dart';
 import 'package:appflowy/features/assistant/logic/action_handler.dart';
 import 'package:appflowy_backend/protobuf/flowy-database2/protobuf.dart';
 import 'package:appflowy_backend/protobuf/flowy-folder/protobuf.dart';
-import 'package:flutter/foundation.dart';
 
 part 'database_row_actions.dart';
 
@@ -54,6 +53,12 @@ bool _isSelect(FieldType? t) =>
 bool _blank(DbField f, String v) =>
     v.isEmpty || f.type == FieldType.Checkbox && v == 'No';
 
+/// Timestamp metadata: regenerated when a row is re-created, so it never
+/// blocks a remove.
+bool _isMeta(FieldType t) =>
+    t == FieldType.CreatedTime || t == FieldType.LastEditedTime;
+const _metaNames = {'created_time', 'last_edited_time'};
+
 /// [v] as the gateway writes it into a [type] cell, or null when it doesn't
 /// fit (or [type] is read-only). Empty clears the cell.
 String? _cellValue(FieldType type, String v) {
@@ -67,12 +72,9 @@ String? _cellValue(FieldType type, String v) {
     case FieldType.RichText:
       return v;
     case FieldType.Number:
-      return num.tryParse(t) == null ? null : t;
+      return RegExp(r'^-?\d+(\.\d+)?$').hasMatch(t) ? t : null;
     case FieldType.DateTime:
-      final d = DateTime.tryParse(t);
-      final ok = RegExp(r'^\d{4}-\d{2}-\d{2}$').hasMatch(t) &&
-          d?.toIso8601String().substring(0, 10) == t;
-      return ok ? t : null;
+      return parseDateText(t) == null ? null : t;
     case FieldType.SingleSelect:
       return _line(t, 'Option') == null ? t : null;
     case FieldType.MultiSelect:
@@ -122,7 +124,13 @@ bool _isRow(ValidationScope s, Object? db, Object? id) {
       item?['cells'] != null;
 }
 
-String? _checkCells(ValidationScope s, Object? db, Object? cells) {
+/// [current]: the row's cells from context, when it has some.
+String? _checkCells(
+  ValidationScope s,
+  Object? db,
+  Object? cells, [
+  Map? current,
+]) {
   if (cells is! Map || cells.length > 50) return 'Bad cells';
   for (final MapEntry(:key, :value) in cells.entries) {
     if (value is! String || value.length > 2000) return 'Bad cell value';
@@ -130,7 +138,10 @@ String? _checkCells(ValidationScope s, Object? db, Object? cells) {
     if (f == null) return 'Unknown field';
     if (f.isEmpty) continue;
     final type = _typeOf(f['type']);
-    if (s.readOnlyIds.contains(key) || f['writable'] != true || type == null) {
+    if (s.readOnlyIds.contains(key) ||
+        f['writable'] != true ||
+        type == null ||
+        isDateRange('${current?[key] ?? ''}')) {
       return 'Field is read-only';
     }
     if (_cellValue(type, value) == null) return 'Bad value for $key';
@@ -138,11 +149,10 @@ String? _checkCells(ValidationScope s, Object? db, Object? cells) {
   return null;
 }
 
-/// The action's cells with the user's edits (top-level keys, see the
-/// preview's `editable`) applied.
+/// The service writes the user's edits to cell keys into `cells`.
 Map<String, String> _cellsOf(AssistAction a) => {
       for (final e in (a.fields['cells'] as Map? ?? const {}).entries)
-        e.key as String: (a.fields[e.key] ?? e.value) as String,
+        e.key as String: e.value as String,
     };
 
 abstract class _Base implements ActionHandler {
@@ -153,16 +163,34 @@ abstract class _Base implements ActionHandler {
   AssistStage get stage => AssistStage.workspace;
 
   @override
-  String? validate(AssistAction a, ValidationScope scope) =>
-      _isDb(scope, a.fields['database_id']) ? null : 'Unknown database_id';
+  String? validate(AssistAction a, ValidationScope scope) {
+    final id = a.fields['database_id'];
+    if (!_isDb(scope, id)) return 'Unknown database_id';
+    return scope.readOnlyIds.contains(id) ? 'Database is locked' : null;
+  }
 
   String db(AssistAction a, ApplyScope scope) =>
       scope.resolve(a.fields['database_id'] as String);
 
-  /// Fields only (no rows), or throws if the database is gone.
-  Future<DbSnapshot> mustDb(String id) async =>
-      await gw.snapshot(id, rowCap: 0) ??
-      (throw StateError('Database not found'));
+  /// Fields only (no rows), or throws if the database is gone or locked (a
+  /// lock may be set after the proposal). Call before any write.
+  Future<DbSnapshot> mustDb(String id) async {
+    final s = await gw.snapshot(id, rowCap: 0);
+    if (s == null || s.isLocked) throw StateError("Database can't be edited");
+    return s;
+  }
+
+  /// For undo: the database, else the outcome to report (gone; locked counts
+  /// as changed).
+  Future<(DbSnapshot?, UndoOutcome?)> undoDb(
+    String id, [
+    int rowCap = 0,
+  ]) async {
+    final s = await gw.snapshot(id, rowCap: rowCap);
+    if (s == null) return (null, UndoOutcome.skippedGone);
+    if (s.isLocked) return (null, UndoOutcome.skippedChanged);
+    return (s, null);
+  }
 
   DbField? field(DbSnapshot s, String id) =>
       s.fields.where((f) => f.id == id).firstOrNull;
@@ -227,6 +255,7 @@ class _Create extends _Base {
       ActionPreview(
         text: 'New ${a.fields['layout']}: ${a.fields['name']} '
             '(${_fields(a).map((f) => f['name']).join(', ')})',
+        editable: const ['name'],
       );
 
   @override
@@ -252,9 +281,9 @@ class _Create extends _Base {
   @override
   Future<UndoOutcome> undo(UndoRecord r) async {
     final id = r.data['database_id'] as String;
-    if ((await gw.databases()).every((d) => d.id != id)) {
-      return UndoOutcome.skippedGone;
-    }
+    final d = (await gw.databases()).where((d) => d.id == id).firstOrNull;
+    if (d == null) return UndoOutcome.skippedGone;
+    if (d.isLocked) return UndoOutcome.skippedChanged;
     await gw.deleteDatabase(id);
     return UndoOutcome.reverted;
   }
@@ -276,6 +305,7 @@ class _FieldAdd extends _Base {
   ActionPreview describe(AssistAction a, Map<String, String> labels) =>
       ActionPreview(
         text: 'Add field: ${a.fields['name']} (${a.fields['field_type']})',
+        editable: const ['name'],
       );
 
   @override
@@ -296,10 +326,11 @@ class _FieldAdd extends _Base {
   @override
   Future<UndoOutcome> undo(UndoRecord r) async {
     final dbId = r.data['database_id'] as String;
-    final s = await gw.snapshot(dbId, rowCap: _allRows);
-    final f = s == null ? null : field(s, r.data['field_id'] as String);
+    final (s, stop) = await undoDb(dbId, _allRows);
+    if (stop != null) return stop;
+    final f = field(s!, r.data['field_id'] as String);
     if (f == null) return UndoOutcome.skippedGone;
-    if (s!.rows.any((row) => !_blank(f, row.cells[f.id] ?? ''))) {
+    if (s.rows.any((row) => !_blank(f, row.cells[f.id] ?? ''))) {
       return UndoOutcome.skippedChanged;
     }
     await gw.removeField(dbId, f.id);
@@ -327,6 +358,7 @@ class _FieldRename extends _Base {
         text: 'Rename field',
         before: labels[a.fields['field_id']] ?? '',
         after: a.fields['name'] as String?,
+        editable: const ['name'],
       );
 
   @override
@@ -351,8 +383,9 @@ class _FieldRename extends _Base {
   @override
   Future<UndoOutcome> undo(UndoRecord r) async {
     final dbId = r.data['database_id'] as String;
-    final s = await gw.snapshot(dbId, rowCap: 0);
-    final f = s == null ? null : field(s, r.data['field_id'] as String);
+    final (s, stop) = await undoDb(dbId);
+    if (stop != null) return stop;
+    final f = field(s!, r.data['field_id'] as String);
     if (f == null) return UndoOutcome.skippedGone;
     if (f.name != r.data['after']) return UndoOutcome.skippedChanged;
     await gw.renameField(dbId, f.id, r.data['before'] as String);
@@ -392,6 +425,7 @@ class _OptionAdd extends _Base {
       ActionPreview(
         text: 'Add option ${a.fields['name']} to '
             '${labels[a.fields['field_id']] ?? ''}',
+        editable: const ['name'],
       );
 
   @override
@@ -417,11 +451,12 @@ class _OptionAdd extends _Base {
   @override
   Future<UndoOutcome> undo(UndoRecord r) async {
     final dbId = r.data['database_id'] as String;
-    final s = await gw.snapshot(dbId, rowCap: _allRows);
-    final f = s == null ? null : field(s, r.data['field_id'] as String);
+    final (s, stop) = await undoDb(dbId, _allRows);
+    if (stop != null) return stop;
+    final f = field(s!, r.data['field_id'] as String);
     final o = f?.options.where((o) => o.id == r.data['option_id']).firstOrNull;
     if (f == null || o == null) return UndoOutcome.skippedGone;
-    if (s!.rows.any(
+    if (s.rows.any(
       (row) => selectNames(f.type, row.cells[f.id] ?? '').contains(o.name),
     )) {
       return UndoOutcome.skippedChanged;
@@ -432,7 +467,7 @@ class _OptionAdd extends _Base {
 }
 
 /// Up to 3 [mentionedIds] that are grids, boards or calendars: fields (with
-/// select options) and rows (non-empty cells as text).
+/// select options) and rows (non-empty cells as text, ≤ 500 chars each).
 Future<ContextPart> databaseContext(
   DatabaseGateway gw,
   List<String> mentionedIds,
@@ -449,6 +484,7 @@ Future<ContextPart> databaseContext(
     final primary = s.fields.firstOrNull?.id;
     ids.add(id);
     labels[id] = s.name;
+    if (s.isLocked) readOnly.add(id);
     if (primary != null) labels['$id#primary'] = primary;
     final fields = [
       for (final f in s.fields)
@@ -474,7 +510,8 @@ Future<ContextPart> databaseContext(
     for (final r in s.rows) {
       final cells = {
         for (final e in r.cells.entries)
-          if (e.value.isNotEmpty) e.key: e.value,
+          if (e.value.isNotEmpty)
+            e.key: e.value.length > 500 ? e.value.substring(0, 500) : e.value,
       };
       ids.add(r.id);
       final title = cells[primary] ?? '';

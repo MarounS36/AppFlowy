@@ -4,6 +4,7 @@ import 'package:appflowy/features/assistant/gateways/database_gateway.dart';
 import 'package:appflowy/features/assistant/logic/action_handler.dart';
 import 'package:appflowy_backend/protobuf/flowy-database2/protobuf.dart';
 import 'package:appflowy_backend/protobuf/flowy-folder/protobuf.dart';
+import 'package:fixnum/fixnum.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mocktail/mocktail.dart';
 
@@ -54,13 +55,30 @@ const owned = DbField(
   type: FieldType.Checkbox,
   writable: true,
 );
-const allFields = [title, link, status, pages, author, tags, readOn, owned];
+const created = DbField(
+  id: 'f9',
+  name: 'Created',
+  type: FieldType.CreatedTime,
+  writable: false,
+);
+const allFields = [
+  title,
+  link,
+  status,
+  pages,
+  author,
+  tags,
+  readOn,
+  owned,
+  created,
+];
 
 typedef DbRow = ({String id, Map<String, String> cells});
 
 DbSnapshot snap({
   List<DbField> fields = allFields,
   List<DbRow> rows = const [],
+  bool locked = false,
 }) =>
     DbSnapshot(
       id: 'd1',
@@ -68,10 +86,18 @@ DbSnapshot snap({
       layout: ViewLayoutPB.Grid,
       fields: fields,
       rows: rows,
+      isLocked: locked,
     );
 
-const dune = (id: 'r1', cells: {'f1': 'Dune', 'f3': 'Done', 'f4': '100'});
+const dune = (
+  id: 'r1',
+  cells: {'f1': 'Dune', 'f3': 'Done', 'f4': '100', 'f9': '2026-10-01'},
+);
 const linked = (id: 'r2', cells: {'f1': 'Emma', 'f5': '1 linked'});
+const ranged = (
+  id: 'r3',
+  cells: {'f1': 'Odyssey', 'f7': '2026-10-19 → 2026-10-21'},
+);
 
 void main() {
   late _MockGateway gw;
@@ -88,8 +114,11 @@ void main() {
     gw = _MockGateway();
     h = {for (final x in databaseHandlers(gw)) x.type: x};
     when(() => gw.databases()).thenAnswer(
-      (_) async => [(id: 'd1', name: 'Books', layout: ViewLayoutPB.Grid)],
+      (_) async => [
+        (id: 'd1', name: 'Books', layout: ViewLayoutPB.Grid, isLocked: false),
+      ],
     );
+    when(() => gw.rowHasExtras(any(), any())).thenAnswer((_) async => false);
   });
 
   void db(DbSnapshot? s) {
@@ -110,15 +139,19 @@ void main() {
     });
   }
 
-  Future<ContextPart> context([List<DbRow> rows = const [dune, linked]]) {
-    db(snap(rows: rows));
+  Future<ContextPart> context([
+    List<DbRow> rows = const [dune, linked, ranged],
+    bool locked = false,
+  ]) {
+    db(snap(rows: rows, locked: locked));
     return databaseContext(gw, ['d1']);
   }
 
   Future<ValidationScope> scope([
-    List<DbRow> rows = const [dune, linked],
+    List<DbRow> rows = const [dune, linked, ranged],
+    bool locked = false,
   ]) async {
-    final c = await context(rows);
+    final c = await context(rows, locked);
     return ValidationScope(
       knownIds: {...c.ids, 's1', 'p1'},
       weekStart: DateTime(2026, 10, 19),
@@ -158,14 +191,27 @@ void main() {
       expect(d['rows'], [
         {'id': 'r1', 'cells': dune.cells},
         {'id': 'r2', 'cells': linked.cells},
+        {'id': 'r3', 'cells': ranged.cells},
       ]);
       expect(c.ids, containsAll(['d1', 'f1', 'f8', 'r1', 'r2']));
-      expect(c.readOnlyIds, {'f2', 'f5'});
+      expect(c.readOnlyIds, {'f2', 'f5', 'f9'});
       expect(c.labels['d1'], 'Books');
       expect(c.labels['f3'], 'Status');
       expect(c.labels['r1'], 'Dune');
       expect(c.items['r2'], {'database_id': 'd1', 'cells': linked.cells});
       expect(c.items['f3']!['type'], 'select');
+    });
+
+    test('a locked database is read-only; long cells are cut to 500', () async {
+      final c = await context(
+        [
+          (id: 'r1', cells: {'f1': 'x' * 600}),
+        ],
+        true,
+      );
+      expect(c.readOnlyIds, contains('d1'));
+      final rows = ((c.json['databases'] as List).single as Map)['rows'];
+      expect(((rows as List).single['cells'] as Map)['f1'], 'x' * 500);
     });
 
     test('a row with no title is "Untitled row"; non-databases are skipped',
@@ -230,7 +276,16 @@ void main() {
             {'database_id': 'd1', 'row_id': id},
           );
       expect(h['row.remove']!.validate(remove('r2'), s), isNotNull);
-      expect(h['row.remove']!.validate(remove('r1'), s), isNull);
+      expect(
+        h['row.remove']!.validate(remove('r1'), s),
+        isNull,
+        reason: 'a created-time value does not block',
+      );
+      expect(
+        h['row.remove']!.validate(remove('r3'), s),
+        isNotNull,
+        reason: 'a date range cannot be restored',
+      );
       expect(h['row.remove']!.validate(remove('zz'), s), isNotNull);
     });
 
@@ -245,8 +300,14 @@ void main() {
             s,
           );
       expect(check({'f4': '12.5'}), isNull);
-      expect(check({'f4': 'many'}), isNotNull);
+      expect(check({'f4': '-3'}), isNull);
+      for (final bad in ['many', 'NaN', 'Infinity', '0x10', '1e3', '.5']) {
+        expect(check({'f4': bad}), isNotNull, reason: bad);
+      }
       expect(check({'f7': '2026-10-19'}), isNull);
+      expect(check({'f7': '2026-10-19 09:30'}), isNull);
+      expect(check({'f7': '2026-10-19 24:00'}), isNotNull);
+      expect(check({'f7': '2026-10-19T09:30'}), isNotNull);
       expect(check({'f7': '2026-02-30'}), isNotNull);
       expect(check({'f7': '19/10/2026'}), isNotNull);
       expect(check({'f8': 'true'}), isNull);
@@ -257,6 +318,45 @@ void main() {
       expect(check({'f4': ''}), isNull, reason: 'empty clears');
       expect(check({'zz': 'x'}), isNotNull);
       expect(check({}), isNotNull, reason: 'row.update needs a cell');
+      expect(
+        h['row.update']!.validate(
+          act('row.update', {
+            'database_id': 'd1',
+            'row_id': 'r3',
+            'cells': {'f7': '2026-10-20'},
+          }),
+          s,
+        ),
+        isNotNull,
+        reason: 'a date range is read-only',
+      );
+    });
+
+    test('nothing in a locked database is a target', () async {
+      final s = await scope(const [dune], true);
+      expect(
+        h['row.update']!.validate(
+          act('row.update', {
+            'database_id': 'd1',
+            'row_id': 'r1',
+            'cells': {'f1': 'Dune II'},
+          }),
+          s,
+        ),
+        isNotNull,
+      );
+      expect(
+        h['field.add']!.validate(
+          act('field.add', {
+            'database_id': 'd1',
+            'temp_id': 'new:1',
+            'name': 'Year',
+            'field_type': 'number',
+          }),
+          s,
+        ),
+        isNotNull,
+      );
     });
 
     test('ids must belong to a context database or an earlier action',
@@ -392,6 +492,7 @@ void main() {
         'cells': {'f4': '300', 'f1': 'Emma'},
       });
       expect(add.text, 'Add row: Emma');
+      expect(add.after, 'Pages: 300; Title: Emma');
       expect(add.editable, ['f4', 'f1']);
       final remove = d('row.remove', {'database_id': 'd1', 'row_id': 'r1'});
       expect(remove.text, 'Remove row: Dune');
@@ -406,6 +507,14 @@ void main() {
         d('option.add', {'field_id': 'f3', 'name': 'Reading'}).text,
         'Add option Reading to Status',
       );
+      for (final t in [
+        'database.create',
+        'field.add',
+        'field.rename',
+        'option.add',
+      ]) {
+        expect(d(t, {'fields': <Map>[]}).editable, ['name'], reason: t);
+      }
     });
   });
 
@@ -489,21 +598,6 @@ void main() {
       expect(r.data['row_id'], 'r9');
     });
 
-    test('uses the edited cell values', () async {
-      db(snap());
-      when(() => gw.addRow('d1', any())).thenAnswer((_) async => 'r9');
-      row('r9', {'f1': 'Emma'});
-      await h['row.add']!.apply(
-        act('row.add', {
-          'database_id': 'd1',
-          'cells': {'f1': 'Ema', 'f4': '1'},
-          'f1': 'Emma',
-        }),
-        ApplyScope({}),
-      );
-      verify(() => gw.addRow('d1', {'f1': 'Emma', 'f4': '1'})).called(1);
-    });
-
     test('a bad value for the live field fails before any write', () async {
       db(snap());
       final s = ApplyScope({'new:2': 'f2'});
@@ -537,8 +631,12 @@ void main() {
       cells = {'f1': 'Emma', 'f4': '7'};
       expect(await h['row.add']!.undo(r), UndoOutcome.skippedChanged);
       verifyNever(() => gw.removeRow(any(), any()));
-      cells = {'f1': 'Emma', 'f4': ''};
-      expect(await h['row.add']!.undo(r), UndoOutcome.reverted);
+      cells = {'f1': 'Emma', 'f4': '', 'f9': '2026-10-20', 'f8': 'No'};
+      expect(
+        await h['row.add']!.undo(r),
+        UndoOutcome.reverted,
+        reason: 'read-only fields and a blank checkbox are not changes',
+      );
       verify(() => gw.removeRow('d1', 'r9')).called(1);
       cells = null;
       expect(await h['row.add']!.undo(r), UndoOutcome.skippedGone);
@@ -578,6 +676,23 @@ void main() {
       expect(cells!['f4'], '130');
     });
 
+    test('a live date range fails without writing', () async {
+      db(snap());
+      row('r1', {'f1': 'Dune', 'f7': '2026-10-19 → 2026-10-21'});
+      await expectLater(
+        h['row.update']!.apply(
+          act('row.update', {
+            'database_id': 'd1',
+            'row_id': 'r1',
+            'cells': {'f7': '2026-10-20'},
+          }),
+          ApplyScope({}),
+        ),
+        throwsStateError,
+      );
+      verifyNever(() => gw.updateRow(any(), any(), any()));
+    });
+
     test('a gone row fails without writing', () async {
       db(snap());
       row('r1', null);
@@ -606,6 +721,7 @@ void main() {
         'f4': '',
         'f5': '',
         'f8': 'No',
+        'f9': '2026-10-01',
       });
       when(() => gw.removeRow('d1', 'r1')).thenAnswer((_) async {});
       final r = await h['row.remove']!.apply(
@@ -623,23 +739,30 @@ void main() {
       expect(r.data['restored_id'], 'r8');
     });
 
-    test('a live read-only value blocks the remove', () async {
+    test('a live read-only value, date range or row page blocks the remove',
+        () async {
       db(snap());
+      Future<void> blocked() => expectLater(
+            h['row.remove']!.apply(
+              act('row.remove', {'database_id': 'd1', 'row_id': 'r1'}),
+              ApplyScope({}),
+            ),
+            throwsStateError,
+          );
       row('r1', {'f1': 'Dune', 'f5': '2 linked'});
-      await expectLater(
-        h['row.remove']!.apply(
-          act('row.remove', {'database_id': 'd1', 'row_id': 'r1'}),
-          ApplyScope({}),
-        ),
-        throwsStateError,
-      );
+      await blocked();
+      row('r1', {'f1': 'Dune', 'f7': '2026-10-19 → 2026-10-21'});
+      await blocked();
+      row('r1', {'f1': 'Dune'});
+      when(() => gw.rowHasExtras('d1', 'r1')).thenAnswer((_) async => true);
+      await blocked();
       verifyNever(() => gw.removeRow(any(), any()));
     });
   });
 
   group('fields', () {
     const year = DbField(
-      id: 'f9',
+      id: 'f10',
       name: 'Year',
       type: FieldType.Number,
       writable: true,
@@ -649,8 +772,8 @@ void main() {
         () async {
       db(snap());
       when(() => gw.addField('d1', 'Year', FieldType.Number))
-          .thenAnswer((_) async => 'f9');
-      when(() => gw.removeField('d1', 'f9')).thenAnswer((_) async {});
+          .thenAnswer((_) async => 'f10');
+      when(() => gw.removeField('d1', 'f10')).thenAnswer((_) async {});
       final s = ApplyScope({});
       final r = await h['field.add']!.apply(
         act('field.add', {
@@ -661,13 +784,13 @@ void main() {
         }),
         s,
       );
-      expect(s.tempIds, {'new:5': 'f9'});
+      expect(s.tempIds, {'new:5': 'f10'});
 
       db(
         snap(
           fields: [...allFields, year],
           rows: [
-            (id: 'r1', cells: {'f9': '1965'}),
+            (id: 'r1', cells: {'f10': '1965'}),
           ],
         ),
       );
@@ -678,12 +801,12 @@ void main() {
         snap(
           fields: [...allFields, year],
           rows: [
-            (id: 'r1', cells: {'f9': ''}),
+            (id: 'r1', cells: {'f10': ''}),
           ],
         ),
       );
       expect(await h['field.add']!.undo(r), UndoOutcome.reverted);
-      verify(() => gw.removeField('d1', 'f9')).called(1);
+      verify(() => gw.removeField('d1', 'f10')).called(1);
 
       db(snap());
       expect(await h['field.add']!.undo(r), UndoOutcome.skippedGone);
@@ -766,6 +889,91 @@ void main() {
 
       db(snap());
       expect(await h['option.add']!.undo(r), UndoOutcome.skippedGone);
+    });
+  });
+
+  group('locked', () {
+    test('a lock set after the proposal stops apply and undo', () async {
+      db(snap(locked: true));
+      row('r1', {'f1': 'Dune', 'f4': '100'});
+      await expectLater(
+        h['row.update']!.apply(
+          act('row.update', {
+            'database_id': 'd1',
+            'row_id': 'r1',
+            'cells': {'f4': '120'},
+          }),
+          ApplyScope({}),
+        ),
+        throwsStateError,
+      );
+      await expectLater(
+        h['field.add']!.apply(
+          act('field.add', {
+            'database_id': 'd1',
+            'name': 'Year',
+            'field_type': 'number',
+          }),
+          ApplyScope({}),
+        ),
+        throwsStateError,
+      );
+      verifyNever(() => gw.updateRow(any(), any(), any()));
+      verifyNever(() => gw.addField(any(), any(), any()));
+      final rec = UndoRecord(
+        type: 'row.update',
+        data: {
+          'database_id': 'd1',
+          'row_id': 'r1',
+          'before': {'f4': '90'},
+          'after': {'f4': '100'},
+        },
+      );
+      expect(await h['row.update']!.undo(rec), UndoOutcome.skippedChanged);
+      verifyNever(() => gw.updateRow(any(), any(), any()));
+    });
+  });
+
+  group('date text', () {
+    DateCellDataPB cell(DateTime? d, {bool time = false, DateTime? end}) =>
+        DateCellDataPB(
+          timestamp: d == null ? null : Int64(d.millisecondsSinceEpoch ~/ 1000),
+          endTimestamp:
+              end == null ? null : Int64(end.millisecondsSinceEpoch ~/ 1000),
+          includeTime: time,
+          isRange: end != null,
+        );
+
+    test('reads a date, a time and a range', () {
+      expect(dateCellText(cell(null)), '');
+      expect(dateCellText(cell(DateTime(2026, 10, 19, 9, 5))), '2026-10-19');
+      expect(
+        dateCellText(cell(DateTime(2026, 10, 19, 9, 5), time: true)),
+        '2026-10-19 09:05',
+      );
+      final r = dateCellText(
+        cell(DateTime(2026, 10, 19), end: DateTime(2026, 10, 21)),
+      );
+      expect(r, '2026-10-19 → 2026-10-21');
+      expect(isDateRange(r), isTrue);
+    });
+
+    test('a time sets includeTime; a date-only write keeps the time of day',
+        () {
+      final timed = dateWrite('2026-10-20 14:30', cell(null));
+      expect(timed.date, DateTime(2026, 10, 20, 14, 30));
+      expect(timed.includeTime, isTrue);
+
+      final keep = dateWrite(
+        '2026-10-22',
+        cell(DateTime(2026, 10, 19, 9, 5), time: true),
+      );
+      expect(keep.date, DateTime(2026, 10, 22, 9, 5));
+      expect(keep.includeTime, isNull, reason: 'not forced to false');
+
+      final plain = dateWrite('2026-10-22', cell(DateTime(2026, 10, 19)));
+      expect(plain.date, DateTime(2026, 10, 22));
+      expect(plain.includeTime, isNull);
     });
   });
 

@@ -258,7 +258,14 @@ class AssistantService {
       ),
       stage: stage,
     );
-    final labels = {for (final p in parts) ...p.labels};
+    // Only labels the kept actions can use (`<id>` or `<id>#…`), so a stored
+    // proposal doesn't carry the whole context.
+    final used = {for (final a in actions) ..._strings(a.fields)};
+    final labels = {
+      for (final p in parts)
+        for (final e in p.labels.entries)
+          if (used.contains(e.key.split('#').first)) e.key: e.value,
+    };
     s.thread.add(ChatTurn(role: 'assistant', text: reply.note));
     // Applied (or replaced) while we waited: the reply revises a proposal
     // that is gone, so keep only its note.
@@ -386,21 +393,33 @@ class AssistantService {
   }
 
   /// The ticked actions, in order, with the user's edits to keys the
-  /// preview marks editable (others are ignored). What apply runs and what a
-  /// follow-up sends back.
+  /// preview marks editable (others are ignored); an edit to a key of the
+  /// action's `cells` goes into a copy of `cells`. What apply runs and what
+  /// a follow-up sends back.
   List<AssistAction> _chosen(Proposal p) => [
         for (final i in p.ticked.toList()..sort())
-          if (p.actions[i] case final a)
-            AssistAction(
-              type: a.type,
-              fields: {
-                ...a.fields,
-                for (final e in {...?p.edits[i]}.entries)
-                  if (_engine.describe(a, p.labels).editable.contains(e.key))
-                    e.key: e.value,
-              },
-            ),
+          if (p.actions[i] case final a) _edited(a, p.edits[i], p.labels),
       ];
+
+  AssistAction _edited(
+    AssistAction a,
+    Map<String, dynamic>? edits,
+    Map<String, String> labels,
+  ) {
+    final editable = _engine.describe(a, labels).editable;
+    final fields = {...a.fields};
+    final cells = fields['cells'] is Map ? {...fields['cells'] as Map} : null;
+    for (final e in {...?edits}.entries) {
+      if (!editable.contains(e.key)) continue;
+      if (cells != null && cells.containsKey(e.key)) {
+        cells[e.key] = e.value;
+      } else {
+        fields[e.key] = e.value;
+      }
+    }
+    if (cells != null) fields['cells'] = cells;
+    return AssistAction(type: a.type, fields: fields);
+  }
 
   /// Claims [id] synchronously; a concurrent apply/retry/undo of the same
   /// proposal throws StateError instead of running the engine again.
@@ -414,19 +433,22 @@ class AssistantService {
   }
 }
 
-/// Every `new:` id anywhere in [v], declared or referenced (row cells use
-/// field ids as keys).
-Iterable<String> _tempIds(Object? v) sync* {
-  if (v is String && v.startsWith('new:')) yield v;
+/// Every `new:` id anywhere in [v], declared or referenced.
+Iterable<String> _tempIds(Object? v) =>
+    _strings(v).where((s) => s.startsWith('new:'));
+
+/// Every string in [v], map keys included (row cells use field ids as keys).
+Iterable<String> _strings(Object? v) sync* {
+  if (v is String) yield v;
   if (v is Map) {
     for (final e in v.entries) {
-      yield* _tempIds(e.key);
-      yield* _tempIds(e.value);
+      yield* _strings(e.key);
+      yield* _strings(e.value);
     }
   }
   if (v is List) {
     for (final x in v) {
-      yield* _tempIds(x);
+      yield* _strings(x);
     }
   }
 }

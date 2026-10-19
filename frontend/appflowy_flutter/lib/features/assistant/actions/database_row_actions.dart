@@ -17,7 +17,13 @@ class _RowAdd extends _Base {
     final title = cells[labels['${a.fields['database_id']}#primary']] ??
         cells.values.firstOrNull ??
         '';
-    return ActionPreview(text: 'Add row: $title', editable: [...cells.keys]);
+    return ActionPreview(
+      text: 'Add row: $title',
+      after: [
+        for (final e in cells.entries) '${labels[e.key] ?? e.key}: ${e.value}',
+      ].join('; '),
+      editable: [...cells.keys],
+    );
   }
 
   @override
@@ -41,13 +47,22 @@ class _RowAdd extends _Base {
     );
   }
 
+  /// Only if its writable cells are unchanged since.
   @override
   Future<UndoOutcome> undo(UndoRecord r) async {
     final dbId = r.data['database_id'] as String;
     final id = r.data['row_id'] as String;
+    final (s, stop) = await undoDb(dbId);
+    if (stop != null) return stop;
     final cur = await gw.row(dbId, id);
     if (cur == null) return UndoOutcome.skippedGone;
-    if (!mapEquals(cur, Map<String, String>.from(r.data['after'] as Map))) {
+    final after = r.data['after'] as Map;
+    bool same(DbField f) {
+      final a = '${after[f.id] ?? ''}', b = cur[f.id] ?? '';
+      return a == b || _blank(f, a) && _blank(f, b);
+    }
+
+    if (!s!.fields.where((f) => f.writable).every(same)) {
       return UndoOutcome.skippedChanged;
     }
     await gw.removeRow(dbId, id);
@@ -69,7 +84,12 @@ class _RowUpdate extends _Base {
     }
     return super.validate(a, scope) ??
         (_isRow(scope, f['database_id'], f['row_id'])
-            ? _checkCells(scope, f['database_id'], f['cells'])
+            ? _checkCells(
+                scope,
+                f['database_id'],
+                f['cells'],
+                scope.items[f['row_id']]?['cells'] as Map?,
+              )
             : 'Unknown row_id');
   }
 
@@ -93,6 +113,9 @@ class _RowUpdate extends _Base {
     final dbId = db(a, scope);
     final id = scope.resolve(a.fields['row_id'] as String);
     final cur = await gw.row(dbId, id) ?? (throw StateError('Row not found'));
+    if (_cellsOf(a).keys.any((k) => isDateRange(cur[scope.resolve(k)] ?? ''))) {
+      throw StateError("A date range can't be changed");
+    }
     final cells = await prepare(dbId, _cellsOf(a), scope);
     final before = {for (final k in cells.keys) k: cur[k] ?? ''};
     await gw.updateRow(dbId, id, cells);
@@ -120,6 +143,8 @@ class _RowUpdate extends _Base {
   Future<UndoOutcome> undo(UndoRecord r) async {
     final dbId = r.data['database_id'] as String;
     final id = r.data['row_id'] as String;
+    final (_, stop) = await undoDb(dbId);
+    if (stop != null) return stop;
     final cur = await gw.row(dbId, id);
     if (cur == null) return UndoOutcome.skippedGone;
     final after = Map<String, String>.from(r.data['after'] as Map);
@@ -142,8 +167,8 @@ class _RowRemove extends _Base {
   @override
   String get type => 'row.remove';
 
-  /// Only rows whose non-empty cells are all writable, so undo can restore
-  /// them.
+  /// Only rows whose non-empty cells are all writable (timestamp metadata
+  /// aside) and not date ranges, so undo can restore them.
   @override
   String? validate(AssistAction a, ValidationScope scope) {
     final dbId = a.fields['database_id'];
@@ -152,12 +177,14 @@ class _RowRemove extends _Base {
     if (bad != null) return bad;
     if (!_isRow(scope, dbId, id)) return 'Unknown row_id';
     final cells = scope.items[id]?['cells'] as Map? ?? const {};
-    if (cells.entries.any(
-      (e) => '${e.value}'.isNotEmpty && scope.readOnlyIds.contains(e.key),
-    )) {
-      return "Row has data that can't be restored";
-    }
-    return null;
+    final lost = cells.entries.any(
+      (e) =>
+          '${e.value}'.isNotEmpty &&
+              scope.readOnlyIds.contains(e.key) &&
+              !_metaNames.contains(scope.items[e.key]?['type']) ||
+          isDateRange('${e.value}'),
+    );
+    return lost ? "Row has data that can't be restored" : null;
   }
 
   @override
@@ -176,9 +203,16 @@ class _RowRemove extends _Base {
     final keep = <String, String>{};
     for (final f in s.fields) {
       final v = cur[f.id] ?? '';
-      if (_blank(f, v)) continue;
-      if (!f.writable) throw StateError("${f.name} can't be restored");
+      if (_blank(f, v) || _isMeta(f.type)) continue;
+      if (!f.writable || isDateRange(v)) {
+        throw StateError("${f.name} can't be restored");
+      }
       keep[f.id] = v;
+    }
+    if (await gw.rowHasExtras(dbId, id)) {
+      throw StateError(
+        "The row's page, icon, cover or files can't be restored",
+      );
     }
     await gw.removeRow(dbId, id);
     return UndoRecord(
@@ -192,14 +226,14 @@ class _RowRemove extends _Base {
     // Idempotent: a repeated undo must not add a second row.
     if (r.data['restored_id'] != null) return UndoOutcome.reverted;
     final dbId = r.data['database_id'] as String;
-    final s = await gw.snapshot(dbId, rowCap: 0);
-    if (s == null) return UndoOutcome.skippedGone;
+    final (s, stop) = await undoDb(dbId);
+    if (stop != null) return stop;
     if (await gw.row(dbId, r.data['row_id'] as String) != null) {
       return UndoOutcome.skippedChanged;
     }
     final cells = {
       for (final e in (r.data['cells'] as Map).entries)
-        if (field(s, e.key as String)?.writable ?? false)
+        if (field(s!, e.key as String)?.writable ?? false)
           e.key as String: e.value as String,
     };
     r.data['restored_id'] = await gw.addRow(dbId, cells);

@@ -78,7 +78,14 @@ class _ProposalPreviewState extends State<ProposalPreview> {
                 for (final key in p.editable)
                   TextField(
                     controller: _controller(i, key),
-                    decoration: const InputDecoration(isDense: true),
+                    decoration: InputDecoration(
+                      isDense: true,
+                      // A cell's box is named after its field.
+                      labelText:
+                          (a.fields['cells'] as Map?)?.containsKey(key) ?? false
+                              ? widget.proposal.labels[key]
+                              : null,
+                    ),
                     onChanged: (v) => _edits.putIfAbsent(i, () => {})[key] = v,
                   ),
               ],

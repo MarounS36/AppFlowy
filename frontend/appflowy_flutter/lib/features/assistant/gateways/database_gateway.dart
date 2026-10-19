@@ -36,6 +36,27 @@ List<String> selectNames(FieldType type, String text) => text.trim().isEmpty
           ]
         : [text.trim()];
 
+/// Date cell text: `YYYY-MM-DD`, plus ` HH:MM` when the cell includes a time;
+/// a range is `<start> → <end>` (read-only).
+bool isDateRange(String text) => text.contains(' → ');
+
+final _dateText = RegExp(r'^(\d{4})-(\d{2})-(\d{2})(?: (\d{2}):(\d{2}))?$');
+
+/// [text] (see [isDateRange]) as a local date, null when it isn't one.
+/// `.time` tells whether it had a time of day.
+({DateTime date, bool time})? parseDateText(String text) {
+  final m = _dateText.firstMatch(text);
+  if (m == null) return null;
+  final n = [for (var i = 1; i <= 5; i++) int.tryParse(m[i] ?? '') ?? 0];
+  final d = DateTime(n[0], n[1], n[2], n[3], n[4]);
+  final ok = d.year == n[0] &&
+      d.month == n[1] &&
+      d.day == n[2] &&
+      d.hour == n[3] &&
+      d.minute == n[4];
+  return ok ? (date: d, time: m[4] != null) : null;
+}
+
 class DbField {
   const DbField({
     required this.id,
@@ -58,10 +79,14 @@ class DbSnapshot {
     required this.layout,
     required this.fields,
     required this.rows,
+    this.isLocked = false,
   });
 
   final String id, name;
   final ViewLayoutPB layout;
+
+  /// Locked databases are read-only.
+  final bool isLocked;
 
   /// The primary field first.
   final List<DbField> fields;
@@ -80,13 +105,13 @@ const _dbLayouts = [
 /// backend call throws. Cell text: select = option names (multi: ", "),
 /// checkbox = Yes/No, date = YYYY-MM-DD; [_write] takes the same text back.
 class DatabaseGateway {
-  Future<List<({String id, String name, ViewLayoutPB layout})>>
+  Future<List<({String id, String name, ViewLayoutPB layout, bool isLocked})>>
       databases() async {
     final views = (await ViewBackendService.getAllViews()).getOrThrow().items;
     return [
       for (final v in views)
         if (_dbLayouts.contains(v.layout))
-          (id: v.id, name: v.name, layout: v.layout),
+          (id: v.id, name: v.name, layout: v.layout, isLocked: v.isLocked),
     ];
   }
 
@@ -100,6 +125,7 @@ class DatabaseGateway {
       id: dbId,
       name: db.name,
       layout: db.layout,
+      isLocked: db.isLocked,
       fields: [
         for (final f in fields)
           DbField(
@@ -220,14 +246,14 @@ class DatabaseGateway {
   ) async {
     final fields = await _fields(dbId);
     final before = await _cells(dbId, rowId, fields);
-    final done = <String>[];
+    final touched = <String>[];
     try {
       for (final e in cells.entries) {
+        touched.add(e.key);
         await _write(dbId, rowId, fields, e.key, e.value);
-        done.add(e.key);
       }
     } catch (_) {
-      for (final k in done) {
+      for (final k in touched) {
         try {
           await _write(dbId, rowId, fields, k, before[k] ?? '');
         } catch (_) {}
@@ -238,6 +264,17 @@ class DatabaseGateway {
 
   Future<void> removeRow(String dbId, String rowId) async =>
       (await RowBackendService.deleteRows(dbId, [rowId])).getOrThrow();
+
+  /// True when the row has a page with content, an icon, a cover or files:
+  /// things a re-created row would lose.
+  Future<bool> rowHasExtras(String dbId, String rowId) async {
+    final m =
+        (await RowBackendService(viewId: dbId).getRowMeta(rowId)).getOrThrow();
+    return !m.isDocumentEmpty ||
+        m.icon.isNotEmpty ||
+        m.hasCover() && m.cover.data.isNotEmpty ||
+        m.attachmentCount > 0;
+  }
 
   Future<String> addField(String dbId, String name, FieldType type) async =>
       (await FieldBackendService.createField(
@@ -346,10 +383,15 @@ class DatabaseGateway {
           fieldId: fieldId,
           rowId: rowId,
         );
-        (await (text.isEmpty
-                ? s.clear()
-                : s.update(date: DateTime.parse(text), includeTime: false)))
-            .getOrThrow();
+        final cur =
+            DateCellDataPB.fromBuffer(await _cell(dbId, rowId, fieldId));
+        if (cur.isRange) throw StateError('${f.name} is a date range');
+        if (text.isEmpty) {
+          (await s.clear()).getOrThrow();
+          return;
+        }
+        final w = dateWrite(text, cur);
+        (await s.update(date: w.date, includeTime: w.includeTime)).getOrThrow();
       case FieldType.SingleSelect || FieldType.MultiSelect:
         final byName = {
           for (final o in _options(f)) o.name.toLowerCase(): o.id,
@@ -414,7 +456,42 @@ class DatabaseGateway {
   }
 }
 
-String _ymd(DateTime d) => d.toIso8601String().substring(0, 10);
+DateTime _local(int seconds) =>
+    DateTime.fromMillisecondsSinceEpoch(seconds * 1000);
+
+/// What writing [text] to a date cell holding [cur] sends: a time sets
+/// includeTime; a date-only text keeps the cell's time of day and leaves
+/// includeTime as it is (null).
+({DateTime date, bool? includeTime}) dateWrite(
+  String text,
+  DateCellDataPB cur,
+) {
+  final v = parseDateText(text) ?? (throw StateError('Bad date $text'));
+  if (v.time) return (date: v.date, includeTime: true);
+  if (!cur.includeTime || !cur.hasTimestamp()) {
+    return (date: v.date, includeTime: null);
+  }
+  final old = _local(cur.timestamp.toInt());
+  final d = v.date;
+  return (
+    date: DateTime(d.year, d.month, d.day, old.hour, old.minute),
+    includeTime: null,
+  );
+}
+
+/// See [isDateRange].
+String dateCellText(DateCellDataPB d) {
+  if (!d.hasTimestamp()) return '';
+  String one(int seconds) {
+    final t = _local(seconds).toIso8601String();
+    return d.includeTime
+        ? '${t.substring(0, 10)} ${t.substring(11, 16)}'
+        : t.substring(0, 10);
+  }
+
+  final start = one(d.timestamp.toInt());
+  return d.isRange ? '$start → ${one(d.endTimestamp.toInt())}' : start;
+}
 
 /// Best-effort text of a cell. Unreadable data reads as "?", so it counts as
 /// non-empty (a row holding it is never removed).
@@ -430,16 +507,7 @@ String _text(FieldType type, List<int> data) {
             .selectOptions
             .map((o) => o.name)
             .join(', '),
-      FieldType.DateTime => () {
-          final d = DateCellDataPB.fromBuffer(data);
-          return d.hasTimestamp()
-              ? _ymd(
-                  DateTime.fromMillisecondsSinceEpoch(
-                    d.timestamp.toInt() * 1000,
-                  ),
-                )
-              : '';
-        }(),
+      FieldType.DateTime => dateCellText(DateCellDataPB.fromBuffer(data)),
       FieldType.URL => URLCellDataPB.fromBuffer(data).content,
       FieldType.CreatedTime ||
       FieldType.LastEditedTime =>

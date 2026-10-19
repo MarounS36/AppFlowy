@@ -89,7 +89,7 @@ void main() {
     });
   });
 
-  testWidgets('an editable cell key starts with its value from cells',
+  testWidgets('a cell box starts with its value and is named for its field',
       (tester) async {
     await tester.pumpWidget(
       WidgetTestWrapper(
@@ -106,16 +106,15 @@ void main() {
             ],
             note: '',
             weekStart: '2026-10-19',
-            labels: const {},
+            labels: const {'f1': 'Title'},
           ),
           describe: (_) => const ActionPreview(text: 'x', editable: ['f1']),
           onApply: (_, __) {},
         ),
       ),
     );
-    expect(
-      tester.widget<TextField>(find.byType(TextField)).controller!.text,
-      'Dune',
-    );
+    final field = tester.widget<TextField>(find.byType(TextField));
+    expect(field.controller!.text, 'Dune');
+    expect(field.decoration!.labelText, 'Title');
   });
 }

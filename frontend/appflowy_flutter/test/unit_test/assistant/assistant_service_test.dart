@@ -256,8 +256,13 @@ void main() {
     when(() => pages.markdown(any())).thenAnswer((_) async => 'Trip notes');
     when(() => dbs.databases()).thenAnswer(
       (_) async => [
-        (id: 'b1', name: 'Sprint', layout: ViewLayoutPB.Board),
-        (id: 'g1', name: 'Books', layout: ViewLayoutPB.Grid),
+        (
+          id: 'b1',
+          name: 'Sprint',
+          layout: ViewLayoutPB.Board,
+          isLocked: false,
+        ),
+        (id: 'g1', name: 'Books', layout: ViewLayoutPB.Grid, isLocked: false),
       ],
     );
     when(() => dbs.snapshot(any())).thenAnswer(
@@ -455,6 +460,82 @@ void main() {
       );
       expect(p!.actions, hasLength(1));
       expect(p.labels['r1'], 'Dune');
+      expect(
+        p.labels.keys.toSet(),
+        {'g1', 'g1#primary', 'r1', 'r1#f1', 'f1'},
+        reason: 'only labels the kept actions use',
+      );
+      final preview = s.describe(p.actions.single, p.labels);
+      expect(preview.text, 'Change row: Dune');
+      expect([
+        preview.before,
+        preview.after,
+      ], [
+        'Title: Dune',
+        'Title: Dune Messiah',
+      ]);
+    });
+
+    test('a cell edit goes into cells: sent back and applied', () async {
+      when(() => dbs.snapshot('g1', rowCap: any(named: 'rowCap'))).thenAnswer(
+        (_) async => const DbSnapshot(
+          id: 'g1',
+          name: 'Books',
+          layout: ViewLayoutPB.Grid,
+          fields: [
+            DbField(
+              id: 'f1',
+              name: 'Title',
+              type: FieldType.RichText,
+              writable: true,
+            ),
+          ],
+          rows: [],
+        ),
+      );
+      when(() => dbs.row('g1', 'r1')).thenAnswer((_) async => {'f1': 'Dune'});
+      when(() => dbs.updateRow('g1', 'r1', any())).thenAnswer((_) async {});
+      final update = AssistAction(
+        type: 'row.update',
+        fields: {
+          'type': 'row.update',
+          'database_id': 'g1',
+          'row_id': 'r1',
+          'cells': {'f1': 'Dune II'},
+        },
+      );
+      await seed(
+        proposal(
+          [update],
+          edits: {
+            0: {'f1': 'Dune III'},
+          },
+        ),
+      );
+      final s = service(realEngine());
+      await s.setConsentedStage(AssistStage.workspace);
+      await s.send('ok', mentionIds: []);
+      expect(bodies.last['proposal'], [
+        {
+          'type': 'row.update',
+          'database_id': 'g1',
+          'row_id': 'r1',
+          'cells': {'f1': 'Dune III'},
+        },
+      ]);
+
+      await seed(
+        proposal(
+          [update],
+          edits: {
+            0: {'f1': 'Dune III'},
+          },
+        ),
+      );
+      final applied = await service(realEngine()).apply();
+      expect(applied.status, AppliedStatus.applied);
+      verify(() => dbs.updateRow('g1', 'r1', {'f1': 'Dune III'})).called(1);
+      expect(update.fields['cells'], {'f1': 'Dune II'}, reason: 'a copy');
     });
 
     test('a follow-up details the boards the open proposal touches', () async {

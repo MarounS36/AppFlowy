@@ -83,8 +83,9 @@ Only this, per message:
   cards (id, title, column id). Caps: 200 cards per board, 3 boards per message.
 - **v2 — Pages:** the page tree (id, name, parent, layout; cap 500) and, for pages the user
   mentions by name, their text as markdown (cap 8,000 chars per page, 3 pages).
-- **v3 — Databases:** for grids/boards the user mentions: fields (id, name, type, select
-  options) and rows (id, cell values as text; cap 200 rows).
+- **v3 — Databases:** for grids/boards the user mentions, or that the current proposal
+  touches: fields (id, name, type, select options) and rows (id, cell values as text; cap 200
+  rows, 500 chars per cell).
 - The conversation so far (last 10 turns) and the current proposal.
 
 The AI refers to items only by ids it was given; items it creates get temporary ids
@@ -261,5 +262,7 @@ v3:
   field type (URL, checklist, relation, media, time, …) is sent as read-only text and never
   written. `row.remove` is only allowed for rows whose non-empty cells are all writable types,
   so Undo can restore them exactly; other rows are dropped with a note.
+- Timestamp metadata fields (created / last edited time) don't block row removal; restored
+  rows get fresh timestamps.
 - Consent is per stage: declining a later stage keeps the assistant working at the highest
   stage consented to; the app sends only that stage's action types and context.
