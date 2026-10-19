@@ -9,6 +9,7 @@ import 'package:appflowy/features/assistant/presentation/assistant_errors.dart';
 import 'package:appflowy/features/assistant/presentation/proposal_preview.dart';
 import 'package:appflowy/generated/locale_keys.g.dart';
 import 'package:appflowy/workspace/presentation/widgets/dialogs.dart';
+import 'package:appflowy_backend/log.dart';
 import 'package:easy_localization/easy_localization.dart';
 import 'package:flutter/material.dart';
 
@@ -36,7 +37,7 @@ class _AssistantViewState extends State<AssistantView> {
   final _removed = <String>{};
   bool _working = false;
   bool _consenting = false;
-  bool _askedPages = false;
+  bool _askedRaise = false;
   int _chipSeq = 0;
   OrganizeErrorKind? _error;
 
@@ -68,7 +69,13 @@ class _AssistantViewState extends State<AssistantView> {
 
   Future<void> _updateChips() async {
     final seq = ++_chipSeq;
-    final m = await _s.mentionsFor(_input.text, pinnedIds: widget.pinnedIds);
+    final List<Mentionable> m;
+    try {
+      m = await _s.mentionsFor(_input.text, pinnedIds: widget.pinnedIds);
+    } catch (e) {
+      Log.warn('Assistant: mentions failed: $e'); // keep the current chips
+      return;
+    }
     if (mounted && seq == _chipSeq) {
       setState(
         () => _chips = m.where((e) => !_removed.contains(e.id)).toList(),
@@ -76,37 +83,42 @@ class _AssistantViewState extends State<AssistantView> {
     }
   }
 
-  /// First use: stage 1, or nothing is sent. Later, once per view, a build
-  /// that can do pages asks for stage 2; declining keeps stage 1 and sends.
+  /// First use asks for everything this build can do; Cancel sends nothing.
+  /// Someone at a lower stage is asked for the next one once per open view;
+  /// "Not now" keeps their stage and sends anyway.
   Future<bool> _consent() async {
     final stage = (await _s.state()).consentedStage;
+    if (stage.index >= kBuiltStage.index) return true;
     if (stage == AssistStage.none) {
-      if (!await _ask(LocaleKeys.assistant_consentStage1)) return false;
-      await _s.setConsentedStage(AssistStage.schedule);
+      if (!await _ask(kBuiltStage, LocaleKeys.button_cancel)) return false;
+      await _s.setConsentedStage(kBuiltStage);
       return true;
     }
-    if (kBuiltStage.index >= AssistStage.pages.index &&
-        stage == AssistStage.schedule &&
-        !_askedPages) {
-      _askedPages = true;
-      if (await _ask(LocaleKeys.assistant_consentStage2)) {
-        await _s.setConsentedStage(AssistStage.pages);
-      }
+    if (_askedRaise) return true;
+    _askedRaise = true;
+    final next = AssistStage.values[stage.index + 1];
+    if (await _ask(next, LocaleKeys.assistant_notNow)) {
+      await _s.setConsentedStage(next);
     }
-    return mounted;
+    return true;
   }
 
-  Future<bool> _ask(String textKey) async {
+  Future<bool> _ask(AssistStage stage, String declineKey) async {
     if (!mounted) return false;
+    final text = switch (stage) {
+      AssistStage.pages => LocaleKeys.assistant_consentStage2,
+      AssistStage.workspace => LocaleKeys.assistant_consentStage3,
+      _ => LocaleKeys.assistant_consentStage1,
+    };
     final ok = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
         title: Text(LocaleKeys.assistant_consentTitle.tr()),
-        content: Text(textKey.tr()),
+        content: Text(text.tr()),
         actions: [
           TextButton(
             onPressed: () => Navigator.of(ctx).pop(false),
-            child: Text(LocaleKeys.button_cancel.tr()),
+            child: Text(declineKey.tr()),
           ),
           FilledButton(
             onPressed: () => Navigator.of(ctx).pop(true),

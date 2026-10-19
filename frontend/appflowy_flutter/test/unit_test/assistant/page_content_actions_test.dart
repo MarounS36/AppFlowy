@@ -1,6 +1,7 @@
 import 'package:appflowy/features/assistant/actions/page_content_actions.dart';
 import 'package:appflowy/features/assistant/data/assistant_models.dart';
 import 'package:appflowy/features/assistant/gateways/page_gateway.dart';
+import 'package:appflowy/features/assistant/logic/action_engine.dart';
 import 'package:appflowy/features/assistant/logic/action_handler.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mocktail/mocktail.dart';
@@ -97,21 +98,39 @@ void main() {
     verifyNever(() => gw.delete('p10'));
   });
 
+  void remove(bool result) => when(
+        () => gw.removeBlocksIfUnchanged(
+          any(),
+          blockIds: any(named: 'blockIds'),
+          padIds: any(named: 'padIds'),
+          expectedMarkdown: any(named: 'expectedMarkdown'),
+        ),
+      ).thenAnswer((_) async => result);
+
   test('append undo removes blocks when unchanged, idempotent', () async {
     page('p1', ref('p1'));
-    when(() => gw.append('p1', 'More')).thenAnswer((_) async => ['k1', 'k2']);
+    when(() => gw.append('p1', 'More')).thenAnswer(
+      (_) async => (contentIds: ['k1', 'k2'], padIds: ['x1', 'x2']),
+    );
     final r = await h['page.append']!.apply(append({}), ApplyScope({}));
     expect(r.type, 'page.append');
     expect(r.data, {
       'page_id': 'p1',
       'block_ids': ['k1', 'k2'],
+      'pad_ids': ['x1', 'x2'],
       'markdown': 'More',
     });
-    when(() => gw.removeBlocksIfUnchanged('p1', ['k1', 'k2'], 'More'))
-        .thenAnswer((_) async => true);
+    remove(true);
     expect(await h['page.append']!.undo(r), UndoOutcome.reverted);
     expect(await h['page.append']!.undo(r), UndoOutcome.skippedGone);
-    verify(() => gw.removeBlocksIfUnchanged(any(), any(), any())).called(1);
+    verify(
+      () => gw.removeBlocksIfUnchanged(
+        'p1',
+        blockIds: ['k1', 'k2'],
+        padIds: ['x1', 'x2'],
+        expectedMarkdown: 'More',
+      ),
+    ).called(1);
   });
 
   test('append undo skipped when the user edited those blocks', () async {
@@ -124,11 +143,28 @@ void main() {
       },
     );
     page('p1', ref('p1'));
-    when(() => gw.removeBlocksIfUnchanged('p1', ['k1'], 'More'))
-        .thenAnswer((_) async => false);
+    remove(false);
+    expect(await h['page.append']!.undo(r), UndoOutcome.skippedChanged);
+    verify(
+      () => gw.removeBlocksIfUnchanged(
+        'p1',
+        blockIds: ['k1'],
+        padIds: [],
+        expectedMarkdown: 'More',
+      ),
+    ).called(1);
+    page('p1', ref('p1', editable: false));
     expect(await h['page.append']!.undo(r), UndoOutcome.skippedChanged);
     page('p1', null);
     expect(await h['page.append']!.undo(r), UndoOutcome.skippedGone);
+    verifyNever(
+      () => gw.removeBlocksIfUnchanged(
+        any(),
+        blockIds: any(named: 'blockIds'),
+        padIds: any(named: 'padIds'),
+        expectedMarkdown: any(named: 'expectedMarkdown'),
+      ),
+    );
   });
 
   test('apply refuses a locked, missing or non-document page before writing',
@@ -179,13 +215,39 @@ void main() {
     expect(v(append({'content': ' '})), isNotNull);
     expect(v(append({'content': 'x' * 20001})), isNotNull);
 
-    scope.boundTemps.add('new:1');
-    expect(v(create({'parent_id': 'new:1'})), isNull);
+    // Parents made earlier in the proposal: pages, boards, databases only.
+    scope.knownIds.add('k1'); // a card: known, but not a page
+    expect(v(create({'parent_id': 'k1'})), isNotNull);
+    scope.boundTemps.addAll(['new:1', 'new:3', 'new:4', 'new:5', 'new:6']);
+    expect(v(create({'parent_id': 'new:1'})), isNotNull, reason: 'no record');
+    for (final (temp, by, ok) in [
+      ('new:1', 'page.create', true),
+      ('new:3', 'board.create', true),
+      ('new:4', 'database.create', true),
+      ('new:5', 'board.card.add', false),
+      ('new:6', 'calendar.add', false),
+    ]) {
+      scope.items[temp] = {'created_by': by};
+      expect(v(create({'parent_id': temp})) == null, ok, reason: by);
+    }
     expect(
       v(append({'page_id': 'new:1'})),
       isNotNull,
       reason: 'layout unknown',
     );
+  });
+
+  test('engine keeps a page.create under a page made earlier in the reply', () {
+    final kept = ActionEngine(pageContentHandlers(gw)).filterValid(
+      [
+        create({'temp_id': 'new:1'}),
+        create({'temp_id': 'new:2', 'parent_id': 'new:1'}),
+        create({'temp_id': 'new:3', 'parent_id': 'new:9'}),
+      ],
+      scope: scope,
+      stage: AssistStage.pages,
+    );
+    expect([for (final a in kept) a.tempId], ['new:1', 'new:2']);
   });
 
   test('previews', () {

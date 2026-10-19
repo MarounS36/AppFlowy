@@ -28,7 +28,7 @@ class ActionEngine {
       knownIds: scope.knownIds,
       weekStart: scope.weekStart,
       readOnlyIds: scope.readOnlyIds,
-      items: scope.items,
+      items: {...scope.items},
       boundTemps: {...scope.boundTemps},
     );
     final kept = <AssistAction>[];
@@ -48,6 +48,9 @@ class ActionEngine {
       }
       kept.add(a);
       s.boundTemps.addAll(temps);
+      if (a.tempId case final String t when t.startsWith('new:')) {
+        s.items[t] = {'created_by': a.type};
+      }
     }
     return kept;
   }

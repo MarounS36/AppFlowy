@@ -19,6 +19,9 @@ String? _content(Object? c) {
   return null;
 }
 
+/// Temps made by these can hold pages.
+const _containers = {'page.create', 'board.create', 'database.create'};
+
 String? _after(Object? c) {
   final s = c is String ? c : '';
   return s.length > 200 ? s.substring(0, 200) : s;
@@ -30,16 +33,6 @@ abstract class _Base implements ActionHandler {
 
   @override
   AssistStage get stage => AssistStage.pages;
-
-  /// [id] must be a known (or earlier-created) page that isn't locked.
-  String? checkPage(Object? id, ValidationScope scope, String key) {
-    if (id is! String ||
-        !(scope.knownIds.contains(id) || scope.boundTemps.contains(id))) {
-      return 'Unknown $key';
-    }
-    if (scope.readOnlyIds.contains(id)) return 'Page is locked';
-    return null;
-  }
 
   /// The page, or throws if it is gone or locked. Call before any write.
   Future<PageRef> mustPage(String id) async {
@@ -55,11 +48,19 @@ class _Create extends _Base {
   @override
   String get type => 'page.create';
 
+  /// The parent is a page/space from context, or a page, board or database
+  /// an earlier action creates; never a card, column or entry.
   @override
-  String? validate(AssistAction a, ValidationScope scope) =>
-      checkPage(a.fields['parent_id'], scope, 'parent_id') ??
-      _name(a.fields['name']) ??
-      _content(a.fields['content']);
+  String? validate(AssistAction a, ValidationScope scope) {
+    final id = a.fields['parent_id'];
+    final item = scope.items[id];
+    final isPage = scope.knownIds.contains(id) && item?['layout'] != null ||
+        scope.boundTemps.contains(id) &&
+            _containers.contains(item?['created_by']);
+    if (!isPage) return 'Unknown parent_id';
+    if (scope.readOnlyIds.contains(id)) return 'Page is locked';
+    return _name(a.fields['name']) ?? _content(a.fields['content']);
+  }
 
   @override
   ActionPreview describe(AssistAction a, Map<String, String> labels) {
@@ -104,11 +105,12 @@ class _Append extends _Base {
   @override
   String? validate(AssistAction a, ValidationScope scope) {
     final id = a.fields['page_id'];
-    return checkPage(id, scope, 'page_id') ??
-        (scope.items[id]?['layout'] == 'document'
-            ? null
-            : 'Not a document page') ??
-        _content(a.fields['content']);
+    if (!scope.knownIds.contains(id) ||
+        scope.items[id]?['layout'] != 'document') {
+      return 'Not a document page';
+    }
+    if (scope.readOnlyIds.contains(id)) return 'Page is locked';
+    return _content(a.fields['content']);
   }
 
   @override
@@ -129,7 +131,12 @@ class _Append extends _Base {
     final blocks = await gw.append(id, md);
     return UndoRecord(
       type: type,
-      data: {'page_id': id, 'block_ids': blocks, 'markdown': md},
+      data: {
+        'page_id': id,
+        'block_ids': blocks.contentIds,
+        'pad_ids': blocks.padIds,
+        'markdown': md,
+      },
     );
   }
 
@@ -138,11 +145,14 @@ class _Append extends _Base {
     // Idempotent: a repeat finds the blocks already gone.
     if (r.data['removed'] == true) return UndoOutcome.skippedGone;
     final id = r.data['page_id'] as String;
-    if (await gw.page(id) == null) return UndoOutcome.skippedGone;
+    final p = await gw.page(id);
+    if (p == null) return UndoOutcome.skippedGone;
+    if (!p.editable) return UndoOutcome.skippedChanged;
     final removed = await gw.removeBlocksIfUnchanged(
       id,
-      (r.data['block_ids'] as List).cast<String>(),
-      r.data['markdown'] as String,
+      blockIds: (r.data['block_ids'] as List).cast<String>(),
+      padIds: (r.data['pad_ids'] as List? ?? const []).cast<String>(),
+      expectedMarkdown: r.data['markdown'] as String,
     );
     if (!removed) return UndoOutcome.skippedChanged;
     r.data['removed'] = true;

@@ -212,12 +212,13 @@ void main() {
     );
   });
 
-  testWidgets('accepting consent records it, then sends', (tester) async {
+  testWidgets('accepting first-use consent grants the built stage, then sends',
+      (tester) async {
     await typeAndSend(tester);
     await tester.tap(find.text('assistant.consentAccept'));
     await tester.pumpAndSettle();
     verifyInOrder([
-      () => service.setConsentedStage(AssistStage.schedule),
+      () => service.setConsentedStage(kBuiltStage),
       () => service.send('move and trip', mentionIds: ['b1', 'b2']),
     ]);
     await tester.pump(const Duration(seconds: 5));
@@ -237,11 +238,12 @@ void main() {
     await tester.pump(const Duration(seconds: 5));
   });
 
-  testWidgets('stage 2 consent: cancel keeps stage 1, sends, asks once',
+  testWidgets('stage 2 consent: Not now keeps stage 1, sends, asks once',
       (tester) async {
     consented(AssistStage.schedule);
     await typeAndSend(tester);
-    await tester.tap(find.text('button.cancel'));
+    expect(find.text('button.cancel'), findsNothing);
+    await tester.tap(find.text('assistant.notNow'));
     await tester.pumpAndSettle();
     verifyNever(() => service.setConsentedStage(any()));
     verify(() => service.send('move and trip', mentionIds: ['b1', 'b2']))
@@ -258,10 +260,30 @@ void main() {
     await tester.pump(const Duration(seconds: 5));
   });
 
-  testWidgets('first use asks stage 1 only', (tester) async {
+  testWidgets('first use shows the built stage text with Cancel',
+      (tester) async {
+    expect(kBuiltStage, AssistStage.pages);
     await typeAndSend(tester);
-    expect(find.text('assistant.consentStage1'), findsOneWidget);
-    expect(find.text('assistant.consentStage2'), findsNothing);
+    expect(find.text('assistant.consentStage2'), findsOneWidget);
+    expect(find.text('assistant.consentStage1'), findsNothing);
+    expect(find.text('button.cancel'), findsOneWidget);
+    expect(find.text('assistant.notNow'), findsNothing);
+  });
+
+  testWidgets('a failed mention lookup keeps the current chips',
+      (tester) async {
+    consented();
+    await tester.pumpWidget(themed(AssistantView(service: service)));
+    await tester.pumpAndSettle();
+    expect(find.text('Move'), findsOneWidget);
+    when(
+      () => service.mentionsFor(any(), pinnedIds: any(named: 'pinnedIds')),
+    ).thenThrow(Exception('backend'));
+    await tester.enterText(find.byType(TextField), 'x');
+    await tester.pump(const Duration(seconds: 1));
+    await tester.pumpAndSettle();
+    expect(tester.takeException(), isNull);
+    expect(find.text('Move'), findsOneWidget);
   });
 
   testWidgets('New page chip fills the input', (tester) async {

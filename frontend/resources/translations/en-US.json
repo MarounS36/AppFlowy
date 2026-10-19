@@ -3525,6 +3525,7 @@
     "consentStage1": "InkNest Assistant sends what you type, and the items it needs to work on — your My Week entries and the boards you mention — to InkNest's server and to NaraRouter (and the AI model provider behind it). InkNest's server does not store them. NaraRouter's and the provider's own data policies apply.",
     "consentStage2": "InkNest Assistant sends what you type, and the items it needs to work on — your My Week entries and the boards you mention, the page list and pages you mention — to InkNest's server and to NaraRouter (and the AI model provider behind it). InkNest's server does not store them. NaraRouter's and the provider's own data policies apply.",
     "consentStage3": "InkNest Assistant sends what you type, and the items it needs to work on — your My Week entries and the boards you mention, the page list and pages you mention, and the tables you mention — to InkNest's server and to NaraRouter (and the AI model provider behind it). InkNest's server does not store them. NaraRouter's and the provider's own data policies apply.",
-    "consentAccept": "Continue"
+    "consentAccept": "Continue",
+    "notNow": "Not now"
   }
 }

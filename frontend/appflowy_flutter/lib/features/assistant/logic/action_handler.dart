@@ -59,7 +59,8 @@ class ValidationScope {
   /// Non-editable boards, locked pages, non-writable fields.
   final Set<String> readOnlyIds;
 
-  /// id → that item's context JSON (e.g. a field's type).
+  /// id → that item's context JSON (e.g. a field's type). The engine adds
+  /// `{'created_by': <action type>}` for each kept action's own `temp_id`.
   final Map<String, Map<String, dynamic>> items;
 
   /// Temp ids declared by earlier kept actions (the engine fills it).

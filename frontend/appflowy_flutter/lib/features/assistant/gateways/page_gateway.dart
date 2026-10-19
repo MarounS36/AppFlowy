@@ -86,92 +86,56 @@ class PageGateway {
     return view.id;
   }
 
-  /// Adds [markdown] at the end of the page in one transaction, as
-  /// ChatEditDocumentService.addMessagesToPage does (with a blank line before
-  /// and after). Returns the inserted top-level block ids, blanks included.
-  Future<List<String>> append(String pageId, String markdown) =>
-      _withEditor(pageId, (editor) async {
-        final content = customMarkdownToDocument(markdown).root.children;
-        if (content.isEmpty) throw StateError("Couldn't convert the content");
-        final last = editor.document.root.children.lastOrNull;
-        final lastEmpty = last?.children.isNotEmpty == false &&
-            last?.delta?.isNotEmpty == false;
-        final path =
-            last == null || listEquals(last.path, const [0]) && lastEmpty
-                ? const [0]
-                : last.path.next;
-        final t = editor.transaction
-          ..insertNodes(path, [
-            if (last == null || !lastEmpty) paragraphNode(),
-            ...content,
-            paragraphNode(),
-          ]);
-        // insertNodes copies the nodes under new ids; these are what's stored.
-        final ids = [
-          for (final op in t.operations.whereType<InsertOperation>())
-            for (final n in op.nodes) n.id,
-        ];
-        await editor.apply(t);
-        return ids;
-      });
+  /// Adds [markdown] at the end of the page; see [appendMarkdown].
+  Future<AppendedBlocks> append(String pageId, String markdown) =>
+      _withEditor(pageId, (editor) => appendMarkdown(editor, markdown));
 
-  /// Deletes [blockIds] in one transaction if all are still there and their
-  /// text still reads as [expectedMarkdown] (blank paragraphs ignored);
-  /// otherwise leaves the page alone and returns false.
+  /// See [removeIfUnchanged].
   Future<bool> removeBlocksIfUnchanged(
-    String pageId,
-    List<String> blockIds,
-    String expectedMarkdown,
-  ) =>
-      _withEditor(pageId, (editor) async {
-        final byId = <String, Node>{};
-        void walk(Node n) {
-          byId[n.id] = n;
-          n.children.forEach(walk);
-        }
-
-        walk(editor.document.root);
-        final nodes = [for (final id in blockIds) byId[id]];
-        if (nodes.contains(null)) return false;
-        final found = nodes.nonNulls.toList();
-        final expected =
-            customMarkdownToDocument(expectedMarkdown).root.children;
-        if (await _md(found) != await _md(expected)) return false;
-        await editor.apply(editor.transaction..deleteNodes(found));
-        return true;
-      });
-
-  Future<String> _md(Iterable<Node> nodes) => customDocumentToMarkdown(
-        Document(
-          root: pageNode(
-            children: [
-              for (final n in nodes)
-                if (n.type != ParagraphBlockKeys.type ||
-                    n.children.isNotEmpty ||
-                    n.delta?.isNotEmpty == true)
-                  n.deepCopy(),
-            ],
-          ),
+    String pageId, {
+    required List<String> blockIds,
+    required List<String> padIds,
+    required String expectedMarkdown,
+  }) =>
+      _withEditor(
+        pageId,
+        (editor) => removeIfUnchanged(
+          editor,
+          contentIds: blockIds,
+          padIds: padIds,
+          expectedMarkdown: expectedMarkdown,
         ),
       );
 
+  /// Runs [run] on the page's open editor when there is one (its bloc saves
+  /// the change and the user sees it), else on a temporary one that is closed
+  /// afterwards. Never closes an editor it didn't open.
   Future<T> _withEditor<T>(
     String pageId,
     Future<T> Function(EditorState editor) run,
   ) async {
+    final open = DocumentBloc.findOpen(pageId);
+    if (open != null) return run(await _editor(open, pageId));
     final bloc = DocumentBloc(documentId: pageId, saveToBlocMap: false)
       ..add(const DocumentEvent.initial());
     try {
-      final s = bloc.state.editorState != null || bloc.state.error != null
-          ? bloc.state
-          : await bloc.stream
-              .firstWhere((s) => s.editorState != null || s.error != null);
-      final editor = s.editorState ??
-          (throw StateError("Couldn't open page $pageId: ${s.error}"));
-      return await run(editor);
+      return await run(await _editor(bloc, pageId));
     } finally {
       await bloc.close();
     }
+  }
+
+  /// Throws if the page fails to load or takes over 10 s, so an apply can't
+  /// hang while holding the proposal's busy guard.
+  Future<EditorState> _editor(DocumentBloc bloc, String pageId) async {
+    bool ready(DocumentState s) => s.editorState != null || s.error != null;
+    final s = ready(bloc.state)
+        ? bloc.state
+        : await bloc.stream
+            .firstWhere(ready)
+            .timeout(const Duration(seconds: 10));
+    return s.editorState ??
+        (throw StateError("Couldn't open page $pageId: ${s.error}"));
   }
 
   /// To Trash.
@@ -182,3 +146,81 @@ class PageGateway {
   Future<void> restore(String pageId) async =>
       (await TrashService.putback(pageId)).getOrThrow();
 }
+
+typedef AppendedBlocks = ({List<String> contentIds, List<String> padIds});
+
+/// Adds [markdown] at the end of [editor]'s document in one transaction, as
+/// ChatEditDocumentService.addMessagesToPage does: a blank paragraph before
+/// it (unless the last block is already empty) and one after. Returns the
+/// content block ids and the padding paragraph ids.
+Future<AppendedBlocks> appendMarkdown(
+  EditorState editor,
+  String markdown,
+) async {
+  if (!editor.editable) throw StateError('Page is locked');
+  final content = [
+    for (final n in customMarkdownToDocument(markdown).root.children)
+      n.deepCopy(),
+  ];
+  if (content.isEmpty) throw StateError("Couldn't convert the content");
+  final last = editor.document.root.children.lastOrNull;
+  final lastEmpty =
+      last != null && last.children.isEmpty && last.delta?.isEmpty == true;
+  final path = last == null || listEquals(last.path, const [0]) && lastEmpty
+      ? const [0]
+      : last.path.next;
+  final lead = lastEmpty ? null : paragraphNode();
+  final trail = paragraphNode();
+  // deepCopy: false keeps these nodes, so their ids are the stored block ids.
+  final t = editor.transaction
+    ..insertNodes(
+      path,
+      [if (lead != null) lead, ...content, trail],
+      deepCopy: false,
+    );
+  await editor.apply(t);
+  return (
+    contentIds: [for (final n in content) n.id],
+    padIds: [if (lead != null) lead.id, trail.id],
+  );
+}
+
+/// Deletes the appended blocks in one transaction when every content block
+/// is still there and still reads as [expectedMarkdown] (compared after the
+/// same markdown round trip); padding paragraphs go too while still blank.
+/// Otherwise changes nothing and returns false.
+Future<bool> removeIfUnchanged(
+  EditorState editor, {
+  required List<String> contentIds,
+  required List<String> padIds,
+  required String expectedMarkdown,
+}) async {
+  if (!editor.editable) return false;
+  final byId = <String, Node>{};
+  void walk(Node n) {
+    byId[n.id] = n;
+    n.children.forEach(walk);
+  }
+
+  walk(editor.document.root);
+  final content = [for (final id in contentIds) byId[id]];
+  if (content.isEmpty || content.contains(null)) return false;
+  final found = content.nonNulls.toList();
+  final expected = customMarkdownToDocument(expectedMarkdown).root.children;
+  if (await _md(found) != await _md(expected)) return false;
+  final pads = [
+    for (final id in padIds)
+      if (byId[id] case final n? when _blank(n)) n,
+  ];
+  await editor.apply(editor.transaction..deleteNodes([...found, ...pads]));
+  return true;
+}
+
+bool _blank(Node n) =>
+    n.type == ParagraphBlockKeys.type &&
+    n.children.isEmpty &&
+    (n.delta?.isEmpty ?? true);
+
+Future<String> _md(Iterable<Node> nodes) => customDocumentToMarkdown(
+      Document(root: pageNode(children: [for (final n in nodes) n.deepCopy()])),
+    );
