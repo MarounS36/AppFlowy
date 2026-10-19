@@ -22,8 +22,9 @@ List<Mentionable> findMentions(String message, List<Mentionable> items) {
   }).toList();
 }
 
-/// Monday 00:00 local of the week a scheduling [message] refers to.
-DateTime targetWeekStart(DateTime now, String message) {
+/// Monday 00:00 local of the week a scheduling [message] refers to;
+/// [current] (an open proposal's week) when it names none.
+DateTime targetWeekStart(DateTime now, String message, {DateTime? current}) {
   final text = message.toLowerCase();
   // DateTime(y, m, d) normalises overflow and stays correct across DST.
   final thisMonday = DateTime(now.year, now.month, now.day - (now.weekday - 1));
@@ -31,5 +32,5 @@ DateTime targetWeekStart(DateTime now, String message) {
       DateTime(thisMonday.year, thisMonday.month, thisMonday.day + 7);
   if (text.contains('next week')) return nextMonday;
   if (text.contains('this week')) return thisMonday;
-  return now.weekday >= DateTime.friday ? nextMonday : thisMonday;
+  return current ?? (now.weekday >= DateTime.friday ? nextMonday : thisMonday);
 }

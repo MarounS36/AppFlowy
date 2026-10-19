@@ -174,8 +174,8 @@ class AssistantService {
   }
 
   /// Sends [message] with the context it needs and stores the reply. Returns
-  /// null (and closes any open proposal) when the reply has no valid action;
-  /// the note is in the thread either way. Switched off or not consented:
+  /// null when the reply has no valid action; an open proposal then stays
+  /// open. The note is in the thread either way. Switched off or not consented:
   /// sends nothing and throws OrganizeApiException(failed); other failures
   /// throw OrganizeApiException and leave the thread as it was, so Retry
   /// doesn't repeat the message.
@@ -206,9 +206,14 @@ class AssistantService {
     List<String> mentionIds,
     AssistStage stage,
   ) async {
-    final week = targetWeekStart(_now(), message);
-    final weekStart = week.toIso8601String().substring(0, 10);
     final open = s.proposal;
+    // A follow-up stays on the open proposal's week unless it names one.
+    final week = targetWeekStart(
+      _now(),
+      message,
+      current: open == null ? null : DateTime.parse(open.weekStart),
+    );
+    final weekStart = week.toIso8601String().substring(0, 10);
     final boardIds = {for (final b in await _boards.boards()) b.id};
     // Mentioned boards, then those the open proposal touches (a `new:` id is
     // not a board yet, so it drops out here).
@@ -273,19 +278,22 @@ class AssistantService {
       await _store.save(s);
       return null;
     }
-    final proposal = actions.isEmpty
-        ? null
-        : Proposal(
-            id: nanoid(),
-            actions: actions,
-            note: reply.note,
-            weekStart: weekStart,
-            labels: labels,
-            ticked: {
-              for (var i = 0; i < actions.length; i++)
-                if (!_engine.describe(actions[i], labels).destructive) i,
-            },
-          );
+    // Nothing valid: keep what the user has (a follow-up changed nothing).
+    if (actions.isEmpty) {
+      await _store.save(s);
+      return null;
+    }
+    final proposal = Proposal(
+      id: nanoid(),
+      actions: actions,
+      note: reply.note,
+      weekStart: weekStart,
+      labels: labels,
+      ticked: {
+        for (var i = 0; i < actions.length; i++)
+          if (!_engine.describe(actions[i], labels).destructive) i,
+      },
+    );
     s.proposal = proposal;
     await _store.save(s);
     return proposal;
@@ -433,9 +441,11 @@ class AssistantService {
   }
 }
 
-/// Every `new:` id anywhere in [v], declared or referenced.
-Iterable<String> _tempIds(Object? v) =>
-    _strings(v).where((s) => s.startsWith('new:'));
+/// Every `new:N` id anywhere in [v], declared or referenced; a title like
+/// "new: logo ideas" is not one.
+Iterable<String> _tempIds(Object? v) => _strings(v).where(_tempRe.hasMatch);
+
+final _tempRe = RegExp(r'^new:\d+$');
 
 /// Every string in [v], map keys included (row cells use field ids as keys).
 Iterable<String> _strings(Object? v) sync* {

@@ -635,19 +635,54 @@ void main() {
       expect(saved.thread.map((t) => t.role), ['user', 'assistant']);
     });
 
-    test('a reply with no valid action clears the proposal, keeps the note',
+    test('a follow-up with no valid action keeps the proposal and the note',
         () async {
       final s = await consented();
       reply([act(0, ref: 'b1')]);
-      await s.send('a', mentionIds: []);
-      reply([act(1, ref: 'nope')], note: 'Nothing to change');
+      final open = (await s.send('a', mentionIds: []))!;
+      reply([act(1, ref: 'nope')], note: 'Which board?');
 
       expect(await s.send('b', mentionIds: []), isNull);
 
       final saved = await store().load();
-      expect(saved.proposal, isNull);
+      expect(saved.proposal!.id, open.id);
       expect(saved.thread.last.role, 'assistant');
-      expect(saved.thread.last.text, 'Nothing to change');
+      expect(saved.thread.last.text, 'Which board?');
+    });
+
+    test('a first reply with no valid action opens no proposal', () async {
+      final s = await consented();
+      reply([act(1, ref: 'nope')], note: 'Nothing to change');
+      expect(await s.send('b', mentionIds: []), isNull);
+      expect((await store().load()).proposal, isNull);
+    });
+
+    test("a follow-up keeps the open proposal's week unless it names one",
+        () async {
+      Proposal open(String week) => Proposal(
+            id: 'p-$week',
+            actions: [act(0)],
+            note: '',
+            weekStart: week,
+            labels: const {},
+          );
+      String sentWeek() =>
+          (bodies.last['context'] as Map)['week_start'] as String;
+      // Monday 2026-10-19: a message naming no week means this week.
+      await seed(open('2026-10-26'));
+      final s = service();
+      reply([act(1)]);
+
+      await s.send('move gym to Thursday', mentionIds: []);
+      expect(sentWeek(), '2026-10-26');
+
+      (await s.state()).proposal = open('2026-10-26');
+      await s.send('this week instead', mentionIds: []);
+      expect(sentWeek(), '2026-10-19');
+
+      (await s.state()).proposal = null;
+      await s.send('move gym to Thursday', mentionIds: []);
+      expect(sentWeek(), '2026-10-19');
     });
 
     test('a failed send leaves the thread unchanged', () async {
@@ -836,6 +871,16 @@ void main() {
       (await s.state()).proposal!.ticked = {0, 1};
       await s.apply();
       expect(calls, ['apply 0', 'apply 1']);
+    });
+
+    test('a title that starts with "new:" is not a temp id', () async {
+      final titled = AssistAction(
+        type: 'cal.x',
+        fields: {'type': 'cal.x', 'n': 0, 'title': 'new: logo ideas'},
+      );
+      await seed(proposal([titled]));
+      await service().apply();
+      expect(calls, ['apply 0 new: logo ideas']);
     });
 
     test('a temp id used as a cells key counts as a reference', () async {
