@@ -1,3 +1,4 @@
+import 'package:appflowy/features/assistant/presentation/ask_inknest_button.dart';
 import 'package:appflowy/generated/locale_keys.g.dart';
 import 'package:appflowy/workspace/application/settings/ai/settings_ai_bloc.dart';
 import 'package:appflowy/workspace/presentation/settings/pages/setting_ai_view/local_ai_setting.dart';
@@ -34,6 +35,7 @@ class SettingsAIView extends StatelessWidget {
           const AIModelSelection(),
           const _AISearchToggle(value: false),
           const LocalAISetting(),
+          const AssistantSettingsToggle(),
         ],
       ),
     );

@@ -1,3 +1,4 @@
+import 'package:appflowy/features/assistant/presentation/ask_inknest_button.dart';
 import 'dart:async';
 import 'dart:convert';
 import 'dart:math';
@@ -487,6 +488,7 @@ class DatabasePluginWidgetBuilder extends PluginWidgetBuilder {
       ],
       child: Row(
         children: [
+          AskInkNestButton(pinnedIds: [view.id]),
           ShareButton(key: ValueKey(view.id), view: view),
           const HSpace(10),
           ViewFavoriteButton(view: view),

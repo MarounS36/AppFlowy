@@ -1,3 +1,5 @@
+import 'package:appflowy/features/assistant/logic/assistant_service.dart';
+import 'package:appflowy/features/assistant/presentation/assistant_dialog.dart';
 import 'dart:async';
 import 'dart:io';
 
@@ -379,6 +381,7 @@ class _SidebarState extends State<_Sidebar> {
               const VSpace(6.0),
               // new page button
               const SidebarNewPageButton(),
+              const _SidebarAskInkNestButton(),
             ],
 
             // scrollable document list
@@ -581,6 +584,42 @@ class _SidebarSearchButton extends StatelessWidget {
         margin: const EdgeInsets.only(left: 8.0),
         text: FlowyText.regular(LocaleKeys.search_label.tr()),
       ),
+    );
+  }
+}
+
+class _SidebarAskInkNestButton extends StatefulWidget {
+  const _SidebarAskInkNestButton();
+
+  @override
+  State<_SidebarAskInkNestButton> createState() =>
+      _SidebarAskInkNestButtonState();
+}
+
+class _SidebarAskInkNestButtonState extends State<_SidebarAskInkNestButton> {
+  late final Future<bool> _available =
+      AssistantService.isAvailable().catchError((_) => false);
+
+  @override
+  Widget build(BuildContext context) {
+    return FutureBuilder<bool>(
+      future: _available,
+      builder: (context, snapshot) {
+        if (snapshot.data != true) return const SizedBox.shrink();
+        return Padding(
+          padding: const EdgeInsets.only(top: 6),
+          child: FlowyTooltip(
+            message: LocaleKeys.assistant_title.tr(),
+            child: FlowyButton(
+              onTap: () => showAssistantDialog(context),
+              leftIcon: const FlowySvg(FlowySvgs.ai_sparks_s),
+              iconPadding: 12.0,
+              margin: const EdgeInsets.only(left: 8.0),
+              text: FlowyText.regular(LocaleKeys.assistant_title.tr()),
+            ),
+          ),
+        );
+      },
     );
   }
 }
