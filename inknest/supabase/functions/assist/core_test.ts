@@ -137,6 +137,14 @@ Deno.test("calendar bounds", () => {
     v([{ type: "calendar.add", title: "T", date: "2026-10-21" }]).length,
     0,
   );
+  // A timed entry with no end is a single point in time.
+  assertEquals(v([{ ...add, end: undefined }]).length, 1);
+  assertEquals(v([{ ...add, end: null }]).length, 1);
+  assertEquals(v([{ ...add, start: null, end: null }]).length, 0);
+  const upd = { type: "calendar.update", entry_id: "e1" };
+  assertEquals(v([{ ...upd, start: "17:00" }]).length, 1);
+  assertEquals(v([{ ...upd, start: "17:00", end: null }]).length, 1);
+  assertEquals(v([{ ...upd, start: "18:00", end: "17:00" }]).length, 0);
 });
 
 Deno.test("titles", () => {

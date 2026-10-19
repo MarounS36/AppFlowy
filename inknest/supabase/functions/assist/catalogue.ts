@@ -76,7 +76,7 @@ const SHAPES: [string[], string][] = [
   [["page.favorite"], "- on: true or false."],
   [
     ["calendar."],
-    "- date: YYYY-MM-DD. start/end: HH:MM 24-hour, null or omitted when all_day is true.",
+    "- date: YYYY-MM-DD. start/end: HH:MM 24-hour, null or omitted when all_day is true; end null or omitted for an entry at one point in time.",
   ],
   [
     ["page.create", "page.append"],
@@ -237,7 +237,8 @@ function crossCheck(a: Action, st: State): boolean {
   if (t === "calendar.add") {
     const timed = a.start != null || a.end != null;
     if (a.all_day === true) return !timed;
-    return isStr(a.start) && isStr(a.end) && a.start < a.end;
+    // No end: an entry at one point in time.
+    return isStr(a.start) && (a.end == null || a.start < (a.end as string));
   }
   if (t === "calendar.update") {
     return !(isStr(a.start) && isStr(a.end)) || a.start < a.end;
