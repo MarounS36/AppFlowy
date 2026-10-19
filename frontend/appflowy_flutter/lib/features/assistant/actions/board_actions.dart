@@ -51,8 +51,19 @@ abstract class _Base implements ActionHandler {
 
   Future<BoardSnapshot?> snapshot(String id) => gw.board(id);
 
-  Future<BoardSnapshot> mustBoard(String id) async =>
-      await gw.board(id) ?? (throw StateError('Board not found'));
+  /// The board, or throws if it is gone or not a single-select board. Call
+  /// before any write.
+  Future<BoardSnapshot> mustBoard(String id) async {
+    final s = await gw.board(id);
+    if (s == null || !s.editable) throw StateError("Board can't be edited");
+    return s;
+  }
+
+  bool hasName(BoardSnapshot s, String name, {String? except}) => s.columns.any(
+        (c) =>
+            c.id != except &&
+            c.name.trim().toLowerCase() == name.trim().toLowerCase(),
+      );
 
   BoardCard? card(BoardSnapshot s, String id) =>
       s.cards.where((c) => c.id == id).firstOrNull;
@@ -78,9 +89,13 @@ class _Create extends _Base {
     if (err != null) return err;
     final cols = _cols(a);
     if (cols.isEmpty) return 'A board needs at least one column';
+    final seen = <String>{};
     for (final c in cols) {
       final e = _text(c['name'], 'Column name');
       if (e != null) return e;
+      if (!seen.add(_trim(c['name']).toLowerCase())) {
+        return 'Duplicate column name';
+      }
     }
     return null;
   }
@@ -141,7 +156,11 @@ class _ColumnAdd extends _Base {
   @override
   Future<UndoRecord> apply(AssistAction a, ApplyScope scope) async {
     final board = scope.resolve(a.fields['board_id'] as String);
-    final id = await gw.addColumn(board, _trim(a.fields['name']));
+    final name = _trim(a.fields['name']);
+    if (hasName(await mustBoard(board), name)) {
+      throw StateError('A column named $name already exists');
+    }
+    final id = await gw.addColumn(board, name);
     final temp = a.tempId;
     if (temp != null) scope.bind(temp, id);
     return UndoRecord(
@@ -186,10 +205,13 @@ class _ColumnRename extends _Base {
   Future<UndoRecord> apply(AssistAction a, ApplyScope scope) async {
     final board = scope.resolve(a.fields['board_id'] as String);
     final id = scope.resolve(a.fields['column_id'] as String);
-    final col = column(await mustBoard(board), id) ??
-        (throw StateError('Column not found'));
+    final s = await mustBoard(board);
+    final col = column(s, id) ?? (throw StateError('Column not found'));
     if (col.isDefault) throw StateError('The default column cannot be renamed');
     final name = _trim(a.fields['name']);
+    if (hasName(s, name, except: id)) {
+      throw StateError('A column named $name already exists');
+    }
     await gw.renameColumn(board, id, name);
     return UndoRecord(
       type: type,
@@ -229,9 +251,10 @@ class _ColumnRemove extends _Base {
   ActionPreview describe(AssistAction a, Map<String, String> labels) {
     final id = a.fields['column_id'];
     final cards = labels['$id#cards'] ?? '';
+    final home = labels['${a.fields['board_id']}#default'] ?? 'No status';
     return ActionPreview(
       text: 'Remove column: ${label(labels, id)}'
-          '${cards.isEmpty ? '' : ' — moves $cards to No status'}',
+          '${cards.isEmpty ? '' : ' — moves $cards to $home'}',
       destructive: true,
     );
   }
@@ -243,17 +266,14 @@ class _ColumnRemove extends _Base {
     final s = await mustBoard(board);
     final col = column(s, id) ?? (throw StateError('Column not found'));
     if (col.isDefault) throw StateError('The default column cannot be removed');
-    await gw.removeColumn(board, id);
+    final moved = await gw.removeColumn(board, id);
     return UndoRecord(
       type: type,
       data: {
         'board_id': board,
         'column_id': id,
         'name': col.name,
-        'card_ids': [
-          for (final c in s.cards)
-            if (c.columnId == id) c.id,
-        ],
+        'card_ids': moved,
       },
     );
   }
@@ -304,6 +324,7 @@ class _CardAdd extends _Base {
     final board = scope.resolve(a.fields['board_id'] as String);
     final col = scope.resolve(a.fields['column_id'] as String);
     final title = _trim(a.fields['title']);
+    await mustBoard(board);
     final id = await gw.addCard(board, col, title);
     final temp = a.tempId;
     if (temp != null) scope.bind(temp, id);
@@ -500,6 +521,7 @@ Future<ContextPart> boardContext(
       for (final c in s.columns) {
         ids.add(c.id);
         labels[c.id] = c.name;
+        if (c.isDefault) labels['${b.id}#default'] = c.name;
         final titles =
             s.cards.where((k) => k.columnId == c.id).map((k) => k.title);
         if (titles.isNotEmpty) labels['${c.id}#cards'] = titles.join(', ');

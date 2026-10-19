@@ -10,6 +10,7 @@ import 'package:appflowy/plugins/database/domain/field_service.dart';
 import 'package:appflowy/plugins/database/domain/group_service.dart';
 import 'package:appflowy/plugins/trash/application/trash_service.dart';
 import 'package:appflowy/workspace/application/view/view_service.dart';
+import 'package:appflowy_backend/log.dart';
 import 'package:appflowy_backend/protobuf/flowy-database2/protobuf.dart';
 import 'package:appflowy_backend/protobuf/flowy-folder/protobuf.dart';
 
@@ -168,9 +169,8 @@ class BoardGateway {
       }
       return (boardId: view.id, columnIds: ids);
     } catch (_) {
-      try {
-        await ViewBackendService.deleteView(viewId: view.id);
-      } catch (_) {}
+      final r = await ViewBackendService.deleteView(viewId: view.id);
+      r.onFailure((e) => Log.warn('Could not clean up board ${view.id}: $e'));
       rethrow;
     }
   }
@@ -211,9 +211,44 @@ class BoardGateway {
               .updateGroup(groupId: columnId, name: name))
           .getOrThrow();
 
-  Future<void> removeColumn(String boardId, String columnId) async =>
+  /// AppFlowy deletes a group's rows with the group, so every card is first
+  /// moved to the default group. Returns the moved card ids; on failure the
+  /// moved cards go back and the error is rethrown.
+  Future<List<String>> removeColumn(String boardId, String columnId) async {
+    final groups = await _groups(boardId);
+    final target = groups.firstWhere((g) => g.isDefault).groupId;
+    final ids = [
+      for (final g in groups.where((g) => g.groupId == columnId))
+        ...g.rows.map((r) => r.id),
+    ];
+    final service = DatabaseViewBackendService(viewId: boardId);
+    final moved = <String>[];
+    try {
+      for (final id in ids) {
+        (await service.moveGroupRow(
+          fromRowId: id,
+          fromGroupId: columnId,
+          toGroupId: target,
+        ))
+            .getOrThrow();
+        moved.add(id);
+      }
       (await GroupBackendService(boardId).deleteGroup(groupId: columnId))
           .getOrThrow();
+    } catch (_) {
+      for (final id in moved) {
+        try {
+          await service.moveGroupRow(
+            fromRowId: id,
+            fromGroupId: target,
+            toGroupId: columnId,
+          );
+        } catch (_) {}
+      }
+      rethrow;
+    }
+    return ids;
+  }
 
   Future<String> addCard(String boardId, String columnId, String title) async {
     final primary = (await FieldBackendService.getPrimaryField(viewId: boardId))

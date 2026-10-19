@@ -100,6 +100,7 @@ void main() {
   });
 
   test('card.add into a new: column resolves via scope', () async {
+    board(snap());
     when(() => gw.addCard('b1', 'c7', 'Write')).thenAnswer((_) async => 'k9');
     final s = ApplyScope({'new:2': 'c7'});
     final r = await h['board.card.add']!.apply(
@@ -216,6 +217,7 @@ void main() {
       'c1': 'To do',
       'c2': 'Doing',
       'c1#cards': 'A, B',
+      'b1#default': 'No Status',
       'k1': 'Write',
       'k1#column': 'To do',
     };
@@ -243,7 +245,7 @@ void main() {
     expect(rn.text, 'Rename column');
     expect([rn.before, rn.after], ['To do', 'Later']);
     final rm = d('board.column.remove', {'board_id': 'b1', 'column_id': 'c1'});
-    expect(rm.text, 'Remove column: To do — moves A, B to No status');
+    expect(rm.text, 'Remove column: To do — moves A, B to No Status');
     expect(rm.destructive, true);
     expect(
       d('board.column.remove', {'board_id': 'b1', 'column_id': 'c2'}).text,
@@ -266,6 +268,7 @@ void main() {
   });
 
   test('column.add undo: removes empty, keeps one holding cards', () async {
+    board(snap());
     when(() => gw.addColumn('b1', 'Done')).thenAnswer((_) async => 'c5');
     final r = await h['board.column.add']!.apply(
       act('board.column.add', {
@@ -276,7 +279,7 @@ void main() {
       ApplyScope({}),
     );
     const done = BoardColumn(id: 'c5', name: 'Done', isDefault: false);
-    when(() => gw.removeColumn('b1', 'c5')).thenAnswer((_) async {});
+    when(() => gw.removeColumn('b1', 'c5')).thenAnswer((_) async => []);
     board(snap(cols: [none, done]));
     expect(await h['board.column.add']!.undo(r), UndoOutcome.reverted);
     board(
@@ -332,11 +335,14 @@ void main() {
         ],
       ),
     );
-    when(() => gw.removeColumn('b1', 'c1')).thenAnswer((_) async {});
+    // k3 sits beyond the snapshot's cards; the gateway still moves it.
+    when(() => gw.removeColumn('b1', 'c1'))
+        .thenAnswer((_) async => ['k1', 'k2', 'k3']);
     final r = await h['board.column.remove']!.apply(
       act('board.column.remove', {'board_id': 'b1', 'column_id': 'c1'}),
       ApplyScope({}),
     );
+    expect(r.data['card_ids'], ['k1', 'k2', 'k3']);
     // Column gone, cards fell into the default group; k2 was moved elsewhere.
     board(
       snap(
@@ -379,6 +385,7 @@ void main() {
   });
 
   test('card.add undo: unchanged removes, changed/gone skipped', () async {
+    board(snap());
     when(() => gw.addCard('b1', 'c1', 'Write')).thenAnswer((_) async => 'k9');
     final r = await h['board.card.add']!.apply(
       act('board.card.add', {
@@ -506,8 +513,99 @@ void main() {
     expect(p.labels['c1'], 'To do');
     expect(p.labels['k1'], 'A');
     expect(p.labels['c1#cards'], 'A, B');
+    expect(p.labels['b1#default'], 'No Status');
     expect(p.labels['k1#column'], 'To do');
     final p2 = await boardContext(gw, ['b1', 'b2']);
     expect(p2.readOnlyIds, {'b2'});
+  });
+
+  test('apply refuses a non-editable or missing board before any write',
+      () async {
+    for (final s in [snap(editable: false), null]) {
+      board(s);
+      for (final a in [
+        act('board.column.add', {
+          'board_id': 'b1',
+          'temp_id': 'new:3',
+          'name': 'X',
+        }),
+        act('board.card.add', {
+          'board_id': 'b1',
+          'column_id': 'c1',
+          'temp_id': 'new:4',
+          'title': 'X',
+        }),
+        act('board.column.rename', {
+          'board_id': 'b1',
+          'column_id': 'c1',
+          'name': 'X',
+        }),
+        act('board.column.remove', {'board_id': 'b1', 'column_id': 'c1'}),
+        act('board.card.update', {
+          'board_id': 'b1',
+          'card_id': 'k1',
+          'title': 'X',
+        }),
+        act('board.card.remove', {'board_id': 'b1', 'card_id': 'k1'}),
+      ]) {
+        await expectLater(
+          h[a.type]!.apply(a, ApplyScope({})),
+          throwsStateError,
+          reason: a.type,
+        );
+      }
+    }
+    verifyNever(() => gw.addColumn(any(), any()));
+    verifyNever(() => gw.addCard(any(), any(), any()));
+    verifyNever(() => gw.removeColumn(any(), any()));
+    verifyNever(() => gw.renameColumn(any(), any(), any()));
+    verifyNever(() => gw.removeCard(any(), any()));
+  });
+
+  test('duplicate column names are rejected', () async {
+    final create = act('board.create', {
+      'temp_id': 'new:1',
+      'name': 'P',
+      'columns': [
+        {'temp_id': 'new:2', 'name': 'Todo'},
+        {'temp_id': 'new:3', 'name': ' todo '},
+      ],
+    });
+    expect(h['board.create']!.validate(create, scope), isNotNull);
+    board(snap());
+    await expectLater(
+      h['board.column.add']!.apply(
+        act('board.column.add', {
+          'board_id': 'b1',
+          'temp_id': 'new:3',
+          'name': 'to DO',
+        }),
+        ApplyScope({}),
+      ),
+      throwsStateError,
+    );
+    await expectLater(
+      h['board.column.rename']!.apply(
+        act('board.column.rename', {
+          'board_id': 'b1',
+          'column_id': 'c1',
+          'name': 'doing',
+        }),
+        ApplyScope({}),
+      ),
+      throwsStateError,
+    );
+    verifyNever(() => gw.addColumn(any(), any()));
+    verifyNever(() => gw.renameColumn(any(), any(), any()));
+    // Renaming a column to its own name (different case) is fine.
+    when(() => gw.renameColumn('b1', 'c1', 'TO DO')).thenAnswer((_) async {});
+    await h['board.column.rename']!.apply(
+      act('board.column.rename', {
+        'board_id': 'b1',
+        'column_id': 'c1',
+        'name': 'TO DO',
+      }),
+      ApplyScope({}),
+    );
   });
 }
