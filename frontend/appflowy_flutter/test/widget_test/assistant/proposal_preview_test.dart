@@ -88,4 +88,34 @@ void main() {
       0: {'title': 'Gym 7am'},
     });
   });
+
+  testWidgets('an editable cell key starts with its value from cells',
+      (tester) async {
+    await tester.pumpWidget(
+      WidgetTestWrapper(
+        child: ProposalPreview(
+          proposal: Proposal(
+            id: 'p2',
+            actions: [
+              AssistAction(
+                type: 'row.add',
+                fields: {
+                  'cells': {'f1': 'Dune'},
+                },
+              ),
+            ],
+            note: '',
+            weekStart: '2026-10-19',
+            labels: const {},
+          ),
+          describe: (_) => const ActionPreview(text: 'x', editable: ['f1']),
+          onApply: (_, __) {},
+        ),
+      ),
+    );
+    expect(
+      tester.widget<TextField>(find.byType(TextField)).controller!.text,
+      'Dune',
+    );
+  });
 }

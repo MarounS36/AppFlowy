@@ -22,6 +22,13 @@ String? _content(Object? c) {
 /// Temps made by these can hold pages.
 const pageContainerActions = {'page.create', 'board.create', 'database.create'};
 
+/// A page/space from context, or a page, board or database an earlier action
+/// creates; never a card, column or entry.
+bool isPageParent(ValidationScope scope, Object? id) =>
+    scope.knownIds.contains(id) && scope.items[id]?['layout'] != null ||
+    scope.boundTemps.contains(id) &&
+        pageContainerActions.contains(scope.items[id]?['created_by']);
+
 String? _after(Object? c) {
   final s = c is String ? c : '';
   return s.length > 200 ? s.substring(0, 200) : s;
@@ -48,16 +55,10 @@ class _Create extends _Base {
   @override
   String get type => 'page.create';
 
-  /// The parent is a page/space from context, or a page, board or database
-  /// an earlier action creates; never a card, column or entry.
   @override
   String? validate(AssistAction a, ValidationScope scope) {
     final id = a.fields['parent_id'];
-    final item = scope.items[id];
-    final isPage = scope.knownIds.contains(id) && item?['layout'] != null ||
-        scope.boundTemps.contains(id) &&
-            pageContainerActions.contains(item?['created_by']);
-    if (!isPage) return 'Unknown parent_id';
+    if (!isPageParent(scope, id)) return 'Unknown parent_id';
     if (scope.readOnlyIds.contains(id)) return 'Page is locked';
     return _name(a.fields['name']) ?? _content(a.fields['content']);
   }

@@ -7,12 +7,15 @@ import 'package:appflowy/features/ai_organize/data/organize_backend.dart';
 import 'package:appflowy/features/ai_organize/data/organize_models.dart';
 import 'package:appflowy/features/assistant/actions/board_actions.dart';
 import 'package:appflowy/features/assistant/actions/calendar_actions.dart';
+import 'package:appflowy/features/assistant/actions/database_actions.dart';
 import 'package:appflowy/features/assistant/actions/page_content_actions.dart';
+import 'package:appflowy/features/assistant/actions/page_workspace_actions.dart';
 import 'package:appflowy/features/assistant/data/assist_api.dart';
 import 'package:appflowy/features/assistant/data/assistant_models.dart';
 import 'package:appflowy/features/assistant/data/assistant_store.dart';
 import 'package:appflowy/features/assistant/gateways/board_gateway.dart';
 import 'package:appflowy/features/assistant/gateways/calendar_gateway.dart';
+import 'package:appflowy/features/assistant/gateways/database_gateway.dart';
 import 'package:appflowy/features/assistant/gateways/page_gateway.dart';
 import 'package:appflowy/features/assistant/logic/action_engine.dart';
 import 'package:appflowy/features/assistant/logic/action_handler.dart';
@@ -25,8 +28,8 @@ import 'package:appflowy_result/appflowy_result.dart';
 import 'package:flutter/foundation.dart';
 import 'package:nanoid/nanoid.dart';
 
-/// Highest stage this build can act on. Task 14 → pages, Task 16 → workspace.
-const AssistStage kBuiltStage = AssistStage.pages;
+/// Highest stage this build can act on.
+const AssistStage kBuiltStage = AssistStage.workspace;
 
 /// Sends "Ask InkNest" messages, keeps the proposal, applies and undoes it.
 ///
@@ -41,6 +44,7 @@ class AssistantService {
     required CalendarGateway calendar,
     required BoardGateway boards,
     required PageGateway pages,
+    required DatabaseGateway databases,
     required Future<String?> Function() accessToken,
     DateTime Function()? now,
   })  : _store = store,
@@ -49,6 +53,7 @@ class AssistantService {
         _calendar = calendar,
         _boards = boards,
         _pages = pages,
+        _databases = databases,
         _accessToken = accessToken,
         _now = now ?? DateTime.now;
 
@@ -58,6 +63,7 @@ class AssistantService {
   final CalendarGateway _calendar;
   final BoardGateway _boards;
   final PageGateway _pages;
+  final DatabaseGateway _databases;
   final Future<String?> Function() _accessToken;
   final DateTime Function() _now;
   Future<AssistantState>? _state;
@@ -87,6 +93,7 @@ class AssistantService {
       final calendar = CalendarGateway();
       final boards = BoardGateway();
       final pages = PageGateway();
+      final databases = DatabaseGateway();
       return AssistantService(
         store: AssistantStore(kv: getIt<KeyValueStorage>(), userId: userId),
         api: AssistApi(url: url),
@@ -94,10 +101,13 @@ class AssistantService {
           ...calendarHandlers(calendar),
           ...boardHandlers(boards),
           ...pageContentHandlers(pages),
+          ...pageWorkspaceHandlers(pages),
+          ...databaseHandlers(databases),
         ]),
         calendar: calendar,
         boards: boards,
         pages: pages,
+        databases: databases,
         accessToken: const OrganizeBackend().accessToken,
       );
     }();
@@ -132,19 +142,26 @@ class AssistantService {
     return consented.index < kBuiltStage.index ? consented : kBuiltStage;
   }
 
-  /// [pinnedIds] (header buttons) first, then boards and pages named in
-  /// [message].
+  /// [pinnedIds] (header buttons) first, then boards, databases and pages
+  /// named in [message]; each item once, as its most specific kind.
   Future<List<Mentionable>> mentionsFor(
     String message, {
     List<String> pinnedIds = const [],
   }) async {
     final boards = await _boards.boards();
     final boardIds = {for (final b in boards) b.id};
+    final dbs = [
+      for (final d in await _databases.databases())
+        if (!boardIds.contains(d.id)) d,
+    ];
+    final taken = {...boardIds, for (final d in dbs) d.id};
     final items = [
       for (final b in boards)
         Mentionable(id: b.id, name: b.name, kind: 'board'),
+      for (final d in dbs)
+        Mentionable(id: d.id, name: d.name, kind: 'database'),
       for (final p in await _pages.tree())
-        if (p.layout != 'space' && !boardIds.contains(p.id))
+        if (p.layout != 'space' && !taken.contains(p.id))
           Mentionable(id: p.id, name: p.name, kind: 'page'),
     ];
     final byId = {for (final m in items) m.id: m};
@@ -206,7 +223,15 @@ class AssistantService {
     final page = stage.index >= AssistStage.pages.index
         ? await pageContext(_pages, mentionIds)
         : null;
-    final parts = [cal, board, if (page != null) page];
+    // Databases: mentioned ones, then those the open proposal touches.
+    final db = stage.index >= AssistStage.workspace.index
+        ? await databaseContext(_databases, [
+            ...mentionIds,
+            for (final a in open?.actions ?? const <AssistAction>[])
+              if (a.fields['database_id'] case final String id) id,
+          ])
+        : null;
+    final parts = [cal, board, if (page != null) page, if (db != null) db];
     final turns = s.thread.sublist(max(0, s.thread.length - kMaxTurns));
     final reply = await _post({
       'allowed_actions': _engine.typesUpTo(stage),
@@ -216,6 +241,7 @@ class AssistantService {
         'calendar': cal.json,
         'boards': board.json['boards'],
         ...?page?.json,
+        ...?db?.json,
       },
       if (open != null) 'proposal': [for (final a in _chosen(open)) a.fields],
     });
@@ -388,12 +414,14 @@ class AssistantService {
   }
 }
 
-/// Every `new:` id anywhere in [v], declared or referenced.
+/// Every `new:` id anywhere in [v], declared or referenced (row cells use
+/// field ids as keys).
 Iterable<String> _tempIds(Object? v) sync* {
   if (v is String && v.startsWith('new:')) yield v;
   if (v is Map) {
-    for (final x in v.values) {
-      yield* _tempIds(x);
+    for (final e in v.entries) {
+      yield* _tempIds(e.key);
+      yield* _tempIds(e.value);
     }
   }
   if (v is List) {

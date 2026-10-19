@@ -39,9 +39,11 @@ class _ProposalPreviewState extends State<ProposalPreview> {
     super.dispose();
   }
 
+  /// A key missing from the action's fields may be one of its `cells`.
   TextEditingController _controller(int i, String key) =>
       _controllers.putIfAbsent((i, key), () {
-        final v = _edits[i]?[key] ?? widget.proposal.actions[i].fields[key];
+        final f = widget.proposal.actions[i].fields;
+        final v = _edits[i]?[key] ?? f[key] ?? (f['cells'] as Map?)?[key];
         return TextEditingController(text: v?.toString() ?? '');
       });
 

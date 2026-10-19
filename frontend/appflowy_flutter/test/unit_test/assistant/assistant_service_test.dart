@@ -5,17 +5,22 @@ import 'package:appflowy/features/ai_organize/data/organize_api.dart';
 import 'package:appflowy/features/ai_organize/data/organize_models.dart';
 import 'package:appflowy/features/assistant/actions/board_actions.dart';
 import 'package:appflowy/features/assistant/actions/calendar_actions.dart';
+import 'package:appflowy/features/assistant/actions/database_actions.dart';
 import 'package:appflowy/features/assistant/actions/page_content_actions.dart';
+import 'package:appflowy/features/assistant/actions/page_workspace_actions.dart';
 import 'package:appflowy/features/assistant/data/assist_api.dart';
 import 'package:appflowy/features/assistant/data/assistant_models.dart';
 import 'package:appflowy/features/assistant/data/assistant_store.dart';
 import 'package:appflowy/features/assistant/gateways/board_gateway.dart';
 import 'package:appflowy/features/assistant/gateways/calendar_gateway.dart';
+import 'package:appflowy/features/assistant/gateways/database_gateway.dart';
 import 'package:appflowy/features/assistant/gateways/page_gateway.dart';
 import 'package:appflowy/features/assistant/logic/action_engine.dart';
 import 'package:appflowy/features/assistant/logic/action_handler.dart';
 import 'package:appflowy/features/assistant/logic/assistant_service.dart';
 import 'package:appflowy_backend/log.dart';
+import 'package:appflowy_backend/protobuf/flowy-database2/protobuf.dart';
+import 'package:appflowy_backend/protobuf/flowy-folder/protobuf.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mocktail/mocktail.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -25,6 +30,8 @@ class _MockCalendar extends Mock implements CalendarGateway {}
 class _MockBoards extends Mock implements BoardGateway {}
 
 class _MockPages extends Mock implements PageGateway {}
+
+class _MockDbs extends Mock implements DatabaseGateway {}
 
 class _MockApi extends Mock implements AssistApi {}
 
@@ -129,6 +136,7 @@ void main() {
   late _MockCalendar calendar;
   late _MockBoards boards;
   late _MockPages pages;
+  late _MockDbs dbs;
   late _MockApi api;
   late _FlakyKv kv;
   late _Fake cal;
@@ -145,6 +153,7 @@ void main() {
         calendar: calendar,
         boards: boards,
         pages: pages,
+        databases: dbs,
         accessToken: () async =>
             tokens.length > 1 ? tokens.removeAt(0) : tokens.first,
         now: () => DateTime(2026, 10, 19, 9), // a Monday
@@ -178,6 +187,8 @@ void main() {
         ...calendarHandlers(calendar),
         ...boardHandlers(boards),
         ...pageContentHandlers(pages),
+        ...pageWorkspaceHandlers(pages),
+        ...databaseHandlers(dbs),
       ]);
 
   setUpAll(() => registerFallbackValue(DateTime(2026)));
@@ -190,6 +201,7 @@ void main() {
     calendar = _MockCalendar();
     boards = _MockBoards();
     pages = _MockPages();
+    dbs = _MockDbs();
     api = _MockApi();
     cal = _Fake('cal.x');
     page = _Fake('page.x', AssistStage.pages);
@@ -242,6 +254,30 @@ void main() {
       ],
     );
     when(() => pages.markdown(any())).thenAnswer((_) async => 'Trip notes');
+    when(() => dbs.databases()).thenAnswer(
+      (_) async => [
+        (id: 'b1', name: 'Sprint', layout: ViewLayoutPB.Board),
+        (id: 'g1', name: 'Books', layout: ViewLayoutPB.Grid),
+      ],
+    );
+    when(() => dbs.snapshot(any())).thenAnswer(
+      (i) async => DbSnapshot(
+        id: i.positionalArguments[0] as String,
+        name: 'Books',
+        layout: ViewLayoutPB.Grid,
+        fields: const [
+          DbField(
+            id: 'f1',
+            name: 'Title',
+            type: FieldType.RichText,
+            writable: true,
+          ),
+        ],
+        rows: const [
+          (id: 'r1', cells: {'f1': 'Dune'}),
+        ],
+      ),
+    );
     reply([]);
   });
 
@@ -266,7 +302,7 @@ void main() {
 
     test('send posts only allowed action types for the active stage', () async {
       final s = await consented(AssistStage.workspace);
-      expect(await s.activeStage(), AssistStage.pages);
+      expect(await s.activeStage(), AssistStage.workspace);
 
       await s.send('plan next week with Sprint', mentionIds: ['b1', 'page9']);
 
@@ -368,6 +404,57 @@ void main() {
       );
       expect(p!.actions.single.type, 'page.append');
       expect(p.labels['p1'], 'Trip');
+    });
+
+    test('databases only for mentioned ones, only when consented to stage 3',
+        () async {
+      final s = await consented(AssistStage.pages);
+      await s.send('add Emma to Books', mentionIds: ['g1']);
+      expect((bodies.last['context'] as Map).containsKey('databases'), isFalse);
+      verifyNever(() => dbs.snapshot(any()));
+      verifyNever(() => dbs.databases());
+
+      await s.setConsentedStage(AssistStage.workspace);
+      await s.send('add Emma to Books', mentionIds: ['g1', 'p1']);
+      final ctx = bodies.last['context'] as Map;
+      expect([
+        for (final d in ctx['databases'] as List) (d as Map)['id'],
+      ], [
+        'g1',
+      ]);
+      verify(() => dbs.snapshot('g1')).called(1);
+
+      await s.send('anything', mentionIds: []);
+      expect((bodies.last['context'] as Map)['databases'], isEmpty);
+    });
+
+    test('stage 3 offers page and database actions and checks them', () async {
+      AssistAction update(String field) => AssistAction(
+            type: 'row.update',
+            fields: {
+              'type': 'row.update',
+              'database_id': 'g1',
+              'row_id': 'r1',
+              'cells': {field: 'Dune Messiah'},
+            },
+          );
+      final s = service(realEngine());
+      await s.setConsentedStage(AssistStage.pages);
+      reply([update('f1')]);
+      expect(await s.send('rename in Books', mentionIds: ['g1']), isNull);
+      expect(bodies.last['allowed_actions'], isNot(contains('row.update')));
+
+      await s.setConsentedStage(AssistStage.workspace);
+      reply([update('f1'), update('zz')]);
+      final p = await s.send('rename in Books', mentionIds: ['g1']);
+      expect(
+        bodies.last['allowed_actions'],
+        containsAll(
+          ['page.rename', 'page.delete', 'database.create', 'row.update'],
+        ),
+      );
+      expect(p!.actions, hasLength(1));
+      expect(p.labels['r1'], 'Dune');
     });
 
     test('a follow-up details the boards the open proposal touches', () async {
@@ -542,6 +629,16 @@ void main() {
     expect(got, [('b1', 'board'), ('p1', 'page')]);
   });
 
+  test('mentionsFor adds databases, boards once', () async {
+    final m = await service().mentionsFor('sprint and books');
+    expect([
+      for (final e in m) (e.id, e.kind),
+    ], [
+      ('b1', 'board'),
+      ('g1', 'database'),
+    ]);
+  });
+
   test('describe passes through to the engine', () {
     expect(service().describe(act(0), {}).text, 'cal.x');
   });
@@ -657,6 +754,20 @@ void main() {
       (await s.state()).proposal!.ticked = {0, 1};
       await s.apply();
       expect(calls, ['apply 0', 'apply 1']);
+    });
+
+    test('a temp id used as a cells key counts as a reference', () async {
+      final cellsRef = AssistAction(
+        type: 'cal.x',
+        fields: {
+          'type': 'cal.x',
+          'n': 1,
+          'cells': {'new:1': 'x'},
+        },
+      );
+      await seed(proposal([act(0, temp: 'new:1'), cellsRef], ticked: {1}));
+      await expectLater(service().apply(), throwsStateError);
+      expect(calls, isEmpty);
     });
 
     test('retry resumes a proposal left applying by a failed save', () async {

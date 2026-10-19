@@ -72,7 +72,7 @@ void main() {
     await tester.pump();
   }
 
-  void consented([AssistStage stage = AssistStage.pages]) =>
+  void consented([AssistStage stage = AssistStage.workspace]) =>
       when(() => service.state()).thenAnswer(
         (_) async => AssistantState(consentedStage: stage),
       );
@@ -260,12 +260,26 @@ void main() {
     await tester.pump(const Duration(seconds: 5));
   });
 
+  testWidgets('stage 3 consent: from pages, Continue records workspace',
+      (tester) async {
+    consented(AssistStage.pages);
+    await typeAndSend(tester);
+    expect(find.text('assistant.consentStage3'), findsOneWidget);
+    await tester.tap(find.text('assistant.consentAccept'));
+    await tester.pumpAndSettle();
+    verifyInOrder([
+      () => service.setConsentedStage(AssistStage.workspace),
+      () => service.send('move and trip', mentionIds: ['b1', 'b2']),
+    ]);
+    await tester.pump(const Duration(seconds: 5));
+  });
+
   testWidgets('first use shows the built stage text with Cancel',
       (tester) async {
-    expect(kBuiltStage, AssistStage.pages);
+    expect(kBuiltStage, AssistStage.workspace);
     await typeAndSend(tester);
-    expect(find.text('assistant.consentStage2'), findsOneWidget);
-    expect(find.text('assistant.consentStage1'), findsNothing);
+    expect(find.text('assistant.consentStage3'), findsOneWidget);
+    expect(find.text('assistant.consentStage2'), findsNothing);
     expect(find.text('button.cancel'), findsOneWidget);
     expect(find.text('assistant.notNow'), findsNothing);
   });
