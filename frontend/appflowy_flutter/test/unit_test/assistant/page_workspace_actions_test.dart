@@ -135,13 +135,12 @@ void main() {
   });
 
   test('previews', () {
-    const l = {'p1': 'Trip', 's1': 'Home', 's2': 'Work'};
+    const l = {'p1#parent': 'Home', 'p1': 'Trip', 's1': 'Home', 's2': 'Work'};
     var d = h['page.rename']!
         .describe(act('page.rename', {'page_id': 'p1', 'name': 'New'}), l);
     expect((d.text, d.before, d.after), ('Rename page', 'Trip', 'New'));
     expect(d.editable, ['name']);
     final mv = act('page.move', {'page_id': 'p1', 'parent_id': 's2'});
-    h['page.move']!.validate(mv, scope);
     d = h['page.move']!.describe(mv, l);
     expect((d.text, d.before, d.after), ('Move Trip', 'Home', 'Work'));
     expect(
@@ -215,6 +214,7 @@ void main() {
       final r = await doApply();
       verify(() => gw.move('p1', 's2', 'p3')).called(1);
       page('p1', ref('p1', parent: 's2'));
+      page('s1', ref('s1', parent: ''));
       page('p8', ref('p8'));
       expect(await h['page.move']!.undo(r), UndoOutcome.reverted);
       verify(() => gw.move('p1', 's1', 'p8')).called(1);
@@ -223,6 +223,7 @@ void main() {
     test('undo uses null prev when sibling left the parent', () async {
       final r = await doApply();
       page('p1', ref('p1', parent: 's2'));
+      page('s1', ref('s1', parent: ''));
       page('p8', ref('p8', parent: 's9'));
       await h['page.move']!.undo(r);
       verify(() => gw.move('p1', 's1', null)).called(1);
@@ -236,9 +237,50 @@ void main() {
       expect(await h['page.move']!.undo(r), UndoOutcome.skippedGone);
     });
 
+    test('undo skipped when the old parent is gone', () async {
+      final r = await doApply();
+      page('p1', ref('p1', parent: 's2'));
+      page('s1', null);
+      expect(await h['page.move']!.undo(r), UndoOutcome.skippedChanged);
+      verifyNever(() => gw.move('p1', 's1', any()));
+    });
+
+    test('apply throws on a live cycle and moves nothing', () async {
+      page('p1', ref('p1'));
+      page('s2', ref('s2', parent: 'c1'));
+      page('c1', ref('c1', parent: 'p1'));
+      await expectLater(
+        h['page.move']!.apply(a, ApplyScope({})),
+        throwsStateError,
+      );
+      verifyNever(() => gw.move(any(), any(), any()));
+    });
+
+    test('validate: locked parent and after_id == page_id', () {
+      scope.readOnlyIds.add('s2');
+      expect(
+        h['page.move']!.validate(
+          act('page.move', {'page_id': 'p1', 'parent_id': 's2'}),
+          scope,
+        ),
+        isNotNull,
+      );
+      scope.readOnlyIds.remove('s2');
+      expect(
+        h['page.move']!.validate(
+          act(
+            'page.move',
+            {'page_id': 'p1', 'parent_id': 's2', 'after_id': 'p1'},
+          ),
+          scope,
+        ),
+        isNotNull,
+      );
+    });
+
     test('resolves temp parent', () async {
       page('p1', ref('p1'));
-      page('p9', ref('p9'));
+      page('p9', ref('p9', parent: ''));
       when(() => gw.prevSiblingId('p1')).thenAnswer((_) async => null);
       when(() => gw.move(any(), any(), any())).thenAnswer((_) async {});
       await h['page.move']!.apply(
@@ -301,6 +343,13 @@ void main() {
   });
 
   group('delete', () {
+    test('undo is skippedGone when restore fails', () async {
+      page('p1', null);
+      when(() => gw.restore('p1')).thenThrow(StateError('gone'));
+      final r = UndoRecord(type: 'page.delete', data: {'page_id': 'p1'});
+      expect(await h['page.delete']!.undo(r), UndoOutcome.skippedGone);
+    });
+
     final a = act('page.delete', {'page_id': 'p1'});
 
     test('apply deletes; undo restores, idempotent if page is back', () async {

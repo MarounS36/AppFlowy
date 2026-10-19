@@ -1,3 +1,4 @@
+import 'package:appflowy/features/assistant/actions/page_content_actions.dart';
 import 'package:appflowy/features/assistant/data/assistant_models.dart';
 import 'package:appflowy/features/assistant/gateways/page_gateway.dart';
 import 'package:appflowy/features/assistant/logic/action_handler.dart';
@@ -9,9 +10,6 @@ List<ActionHandler> pageWorkspaceHandlers(PageGateway gw) => [
       _Favorite(gw),
       _Delete(gw),
     ];
-
-/// Temps made by these can hold pages.
-const _containers = {'page.create', 'board.create', 'database.create'};
 
 String _label(Map<String, String> labels, Object? id) => labels[id] ?? '';
 
@@ -117,12 +115,9 @@ class _Move extends _Base {
   String? validate(AssistAction a, ValidationScope scope) {
     final bad = super.validate(a, scope);
     if (bad != null) return bad;
-    // Remembered for describe, which only gets labels.
-    _parents[a.fields['page_id'] as String] =
-        scope.items[a.fields['page_id']]?['parent_id'] as String? ?? '';
     final parent = a.fields['parent_id'];
     final isTemp = scope.boundTemps.contains(parent) &&
-        _containers.contains(scope.items[parent]?['created_by']);
+        pageContainerActions.contains(scope.items[parent]?['created_by']);
     if (!isTemp &&
         !(scope.knownIds.contains(parent) &&
             scope.items[parent]?['layout'] != null)) {
@@ -134,9 +129,11 @@ class _Move extends _Base {
       if (cur == a.fields['page_id']) return "Can't move a page into itself";
       cur = scope.items[cur]?['parent_id'];
     }
+    if (scope.readOnlyIds.contains(parent)) return 'Parent is locked';
     final after = a.fields['after_id'];
     if (after != null &&
-        (!scope.knownIds.contains(after) ||
+        (after == a.fields['page_id'] ||
+            !scope.knownIds.contains(after) ||
             scope.items[after]?['layout'] == null)) {
       return 'Unknown after_id';
     }
@@ -151,12 +148,10 @@ class _Move extends _Base {
     final id = a.fields['page_id'];
     return ActionPreview(
       text: 'Move ${_label(labels, id)}',
-      before: _label(labels, _parents[id]),
+      before: _label(labels, '$id#parent'),
       after: _label(labels, a.fields['parent_id']),
     );
   }
-
-  final _parents = <String, String>{};
 
   @override
   Future<UndoRecord> apply(AssistAction a, ApplyScope scope) async {
@@ -164,6 +159,12 @@ class _Move extends _Base {
     final parent = scope.resolve(a.fields['parent_id'] as String);
     final p = await mustPage(id);
     await mustPage(parent);
+    // The live tree may differ from the snapshot the AI saw.
+    String? cur = parent;
+    for (var i = 0; cur != null && cur.isNotEmpty; i++) {
+      if (cur == id || i >= 500) throw StateError("Can't move into itself");
+      cur = (await gw.page(cur))?.parentId;
+    }
     final prev = await gw.prevSiblingId(id);
     final after = a.fields['after_id'] as String?;
     await gw.move(id, parent, after);
@@ -185,6 +186,7 @@ class _Move extends _Base {
     if (p == null) return UndoOutcome.skippedGone;
     if (p.parentId != r.data['parent']) return UndoOutcome.skippedChanged;
     final back = r.data['before_parent'] as String;
+    if (await gw.page(back) == null) return UndoOutcome.skippedChanged;
     final prev = r.data['before_prev'] as String?;
     final sib = prev == null ? null : await gw.page(prev);
     await gw.move(id, back, sib != null && sib.parentId == back ? prev : null);
@@ -297,7 +299,12 @@ class _Delete extends _Base {
   @override
   Future<UndoOutcome> undo(UndoRecord r) async {
     final id = r.data['page_id'] as String;
-    if (await gw.page(id) == null) await gw.restore(id);
+    if (await gw.page(id) != null) return UndoOutcome.reverted;
+    try {
+      await gw.restore(id);
+    } catch (_) {
+      return UndoOutcome.skippedGone;
+    }
     return UndoOutcome.reverted;
   }
 }

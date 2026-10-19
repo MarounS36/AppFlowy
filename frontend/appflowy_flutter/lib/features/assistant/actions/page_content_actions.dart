@@ -20,7 +20,7 @@ String? _content(Object? c) {
 }
 
 /// Temps made by these can hold pages.
-const _containers = {'page.create', 'board.create', 'database.create'};
+const pageContainerActions = {'page.create', 'board.create', 'database.create'};
 
 String? _after(Object? c) {
   final s = c is String ? c : '';
@@ -56,7 +56,7 @@ class _Create extends _Base {
     final item = scope.items[id];
     final isPage = scope.knownIds.contains(id) && item?['layout'] != null ||
         scope.boundTemps.contains(id) &&
-            _containers.contains(item?['created_by']);
+            pageContainerActions.contains(item?['created_by']);
     if (!isPage) return 'Unknown parent_id';
     if (scope.readOnlyIds.contains(id)) return 'Page is locked';
     return _name(a.fields['name']) ?? _content(a.fields['content']);
@@ -188,7 +188,16 @@ Future<ContextPart> pageContext(
       ],
       'page_texts': texts,
     },
-    labels: {for (final p in tree) p.id: p.name.isEmpty ? 'Untitled' : p.name},
+    labels: {
+      for (final p in tree) p.id: p.name.isEmpty ? 'Untitled' : p.name,
+      // The current parent's label, for page.move's preview.
+      for (final p in tree)
+        '${p.id}#parent': tree
+                .where((q) => q.id == p.parentId)
+                .map((q) => q.name.isEmpty ? 'Untitled' : q.name)
+                .firstOrNull ??
+            '',
+    },
     ids: {for (final p in tree) p.id},
     readOnlyIds: {
       for (final p in tree)
